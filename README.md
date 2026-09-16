@@ -28,37 +28,146 @@ full reverse-engineering writeup.
 > measured values in this repo are from one chassis; re-derive yours with
 > `p2afan pwm-dump` and `p2afan map`.
 
-## Does it work on my machine?
+## Requirements
 
-You need an ASPEED BMC whose VGA function exposes BAR1, with the P2A bridge
-enabled and unlocked. Check in three commands:
+| Need | Why | Check |
+|---|---|---|
+| ASPEED BMC (AST2400/2500) | the PWM block and P2A bridge live in it | `lspci -d 1a03:` shows a VGA function |
+| P2A bridge enabled and unlocked | the only host path to the BMC's bus | `p2afan pwm-dump` (below) |
+| root | BAR1 via PCI sysfs is mode `0600` | — |
+| Python **3.11+** | `tomllib` is used for config; stdlib only, no pip | `python3 -V` |
+| `ipmitool` + `/dev/ipmi0` | reading BMC sensors and fan tachs | `sudo ipmitool sdr elist full` |
+
+On Debian/Ubuntu:
 
 ```sh
-lspci -d 1a03:                      # find the ASPEED function, e.g. 0c:00.0
-sudo p2afan pwm-dump                # should print live PWM/tach registers
-sudo p2afan sensors                 # should print BMC temps and fan RPM
+sudo apt-get install -y ipmitool
+sudo modprobe ipmi_si ipmi_devintf      # creates /dev/ipmi0
 ```
 
-If `pwm-dump` prints plausible registers (a non-zero `CTRL` with bit 0 set, duty
-bytes that match your fans' idle), you're in business. If AHB reads come back as
-`0x00000000`/`0xffffffff`, your BMC has locked P2A and this tool cannot reach it.
+`git` is only needed to clone. The `ast` DRM driver may stay bound — it does not
+conflict, because access goes through the PCI sysfs resource rather than
+`/dev/mem`.
+
+## Does it work on my machine?
+
+Find the ASPEED **VGA** function (not the AST1150 PCI-to-PCI bridge that sits
+in front of it) and point `p2afan` at it:
+
+```sh
+lspci -d 1a03:
+# 0b:00.0 PCI bridge: ... AST1150 PCI-to-PCI Bridge      <- not this one
+# 0c:00.0 VGA compatible controller: ASPEED Graphics ...  <- this one
+```
+
+The address is currently a constant in `p2afan/ahb.py`. If yours is not
+`0000:0c:00.0`:
+
+```sh
+sudo sed -i 's|0000:0c:00.0|0000:<your-bdf>|' /opt/p2afan/p2afan/ahb.py
+```
+
+Then the read-only smoke test — this writes nothing:
+
+```sh
+sudo /opt/p2afan/bin/p2afan pwm-dump    # PWM/tach registers + per-channel duty
+sudo /opt/p2afan/bin/p2afan sensors     # BMC temps and fan RPM
+```
+
+You are in business if `pwm-dump` prints a non-zero `CTRL` with bit 0 set
+(`CLK_EN`) and duty bytes consistent with your fans' idle noise. **Save that
+output** — it is your factory baseline and the thing you restore to.
+
+If AHB reads come back as all-`0x00000000` or all-`0xffffffff`, the bridge is
+disabled or locked and `p2afan` cannot reach your BMC. If `pwm-dump` raises
+`BridgeUnavailable: PWM clock disabled`, this BMC does not drive fans from this
+block at all.
+
+One thing that surprises people later: **`pwm-dump` needs the P2A lock even
+though it only reads.** Every access re-points one shared AHB window register,
+so reads must be serialised too. Once the service is running it owns that lock,
+and register commands fail with `P2A bridge lock … held by another process`.
+That is expected — use `p2afan status` (lock-free) for routine checks, and stop
+the service for anything that touches registers:
+
+| Lock-free, any time | Needs the lock (stop the service first) |
+|---|---|
+| `status`, `sensors` | `pwm-dump`, `get`, `set`, `set-raw`, `release`, `failsafe`, `map`, `dump-flash`, `ahb-read` |
 
 ## Install
 
-No packaging, no dependencies — Python 3.11+ standard library only (`tomllib`).
-
 ```sh
-sudo git clone https://github.com/<you>/p2afan /opt/p2afan
-sudo mkdir -p /etc/p2afan
+sudo git clone https://github.com/larkinwc/p2afan /opt/p2afan
+sudo install -d -m 755 /etc/p2afan
 sudo cp /opt/p2afan/config/config.toml /etc/p2afan/config.toml
-sudo /opt/p2afan/bin/p2afan map              # discover channel -> fan mapping
-sudo ln -s /opt/p2afan/systemd/p2afan.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now p2afan
 ```
 
-Edit `/etc/p2afan/config.toml` first if your chassis differs from the reference
-one — in particular the PCI address of the ASPEED function in `p2afan/ahb.py`
-(`BAR`) and the zone curves.
+**Now edit `/etc/p2afan/config.toml` before going any further.** The shipped
+file is the reference chassis: its zones use Tyan B7079 IPMI sensor numbers
+(`0x20`–`0x2e` for GPUs, `0x01`/`0x02` for CPU DTS, `0x08` for the outlet) and
+its `critical_c` values sit just under *that* firmware's SDR limits. Wrong
+sensor numbers on your board mean a zone with no valid reading, which trips
+failsafe and runs your fans at 100 % forever. Cross-check every `sensor =`
+against your own `p2afan sensors` output, and set `min_duty_pct` to your
+measured factory idle.
+
+Then map which PWM channel drives which fan:
+
+```sh
+sudo /opt/p2afan/bin/p2afan map
+```
+
+> [!CAUTION]
+> `map` is the one disruptive step. It raises each channel to 60 % in turn,
+> ~20 s per channel, so expect **2–3 minutes of loud fans**. It restores the
+> entry duty after every probe and again at the end. Run it on an idle machine,
+> and never while the service is running. It refuses to overwrite an existing
+> `/etc/p2afan/mapping.toml` without `--force`.
+
+Sanity-check the result — every fan should appear under exactly one channel:
+
+```sh
+cat /etc/p2afan/mapping.toml
+```
+
+Optionally prove actuation by hand before handing over to systemd:
+
+```sh
+sudo /opt/p2afan/bin/p2afan set 40     # audibly louder within a few seconds
+sudo /opt/p2afan/bin/p2afan get
+sudo /opt/p2afan/bin/p2afan release    # back to the pre-takeover duty
+```
+
+Finally enable the service:
+
+```sh
+sudo ln -s /opt/p2afan/systemd/p2afan.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now p2afan
+sudo p2afan status          # or /opt/p2afan/bin/p2afan status
+journalctl -u p2afan -f     # one line per 5 s tick
+```
+
+`status` should show your expected duty, `failsafe false`, and `overrides 0`. A
+climbing `overrides` count means your BMC *is* rewriting the duty registers
+behind you — set `hold_interval` (e.g. `0.25`) in the config to re-assert faster
+than it corrects.
+
+Put the CLI on your `PATH` if you like: `sudo ln -s /opt/p2afan/bin/p2afan
+/usr/local/bin/p2afan`.
+
+### Uninstall
+
+```sh
+sudo systemctl disable --now p2afan     # ExecStopPost restores factory duty
+sudo rm /etc/systemd/system/p2afan.service
+sudo systemctl daemon-reload
+sudo /opt/p2afan/bin/p2afan pwm-dump    # confirm duty is back at your baseline
+sudo rm -rf /opt/p2afan /etc/p2afan
+```
+
+A clean stop hands control back to the BMC's own thermal loop, so there is
+nothing else to undo.
 
 ## Configuration
 
