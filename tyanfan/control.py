@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import socket
 import time
 import tomllib
@@ -35,7 +36,8 @@ DEFAULTS = {
     "down_slew_pct_per_tick": 3.0,
     "hold_interval": 0.0,
     "source_fail_limit": 3,
-    "min_fan_rpm": 500,
+    # Matches the firmware's own SYS_FAN_n lower-critical threshold (720 RPM).
+    "min_fan_rpm": 720,
     "recover_ticks": 6,
     "failsafe_inject_c": 95.0,
     "write_channels": [],
@@ -456,16 +458,26 @@ class Controller:
             self.ahb = None
 
 
+class _Terminated(BaseException):
+    """SIGTERM arrived; unwind so the fans get released."""
+
+
 def run_daemon(config_path: str = CONFIG_PATH, mapping_path: str = MAPPING_PATH) -> int:
     cfg = load_config(config_path)
     ctl = Controller(cfg, load_mapping(mapping_path))
+
+    def _on_term(signum: int, _frame: object) -> None:
+        raise _Terminated(signal.Signals(signum).name)
+
+    previous = signal.signal(signal.SIGTERM, _on_term)
     try:
         ctl.run()
-    except KeyboardInterrupt:
-        LOG.info("interrupted; releasing fans")
+    except (KeyboardInterrupt, _Terminated) as exc:
+        LOG.info("%s; releasing fans", exc.args[0] if exc.args else "interrupted")
         ctl.release()
         return 0
     finally:
+        signal.signal(signal.SIGTERM, previous)
         ctl.close()
     return 0
 

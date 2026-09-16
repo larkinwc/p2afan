@@ -12,6 +12,10 @@ hold_interval = 0.0   # >0 re-asserts duty between ticks at this period
 # PWMG (parked at duty 0) and PWMH (disabled) are never written.
 write_channels = []
 
+# Zone critical points sit below the firmware's own SDR upper-critical limits,
+# read from the live BMC: GPU 87 C, CPU_DTS 85 C, SYS_Air_Outlet 70 C
+# (`ipmitool sensor get <name>`). The fan stall threshold below matches the
+# firmware's SYS_FAN_n lower-critical of 720 RPM.
 [[zone]]
 name = "gpu"
 critical_c = 85
@@ -30,9 +34,9 @@ sources = [
 
 [[zone]]
 name = "cpu"
-critical_c = 88
+critical_c = 83
 hysteresis_c = 3
-curve = [[45, 25], [60, 45], [75, 80], [88, 100]]
+curve = [[45, 25], [60, 45], [75, 80], [83, 100]]
 sources = [
   { kind = "ipmi", name = "CPU0", sensor = 0x01 },
   { kind = "ipmi", name = "CPU1", sensor = 0x02 },
