@@ -13,10 +13,10 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tyanfan import ipmi, pwm  # noqa: E402
-from tyanfan.control import choose_baseline, slew, writable_channels  # noqa: E402
-from tyanfan.curve import Curve, Zone  # noqa: E402
-from tyanfan.sources import build  # noqa: E402
+from p2afan import ipmi, pwm  # noqa: E402
+from p2afan.control import choose_baseline, slew, writable_channels  # noqa: E402
+from p2afan.curve import Curve, Zone  # noqa: E402
+from p2afan.sources import build  # noqa: E402
 
 
 class TestCurve(unittest.TestCase):
@@ -123,7 +123,7 @@ class FakeProc:
 
 class TestIpmiDecode(unittest.TestCase):
     def read(self, stdout, fn=ipmi.read_raw, sensor=0x20):
-        with mock.patch("tyanfan.ipmi.subprocess.run", return_value=FakeProc(stdout)):
+        with mock.patch("p2afan.ipmi.subprocess.run", return_value=FakeProc(stdout)):
             return fn(sensor)
 
     def test_no_reading_decodes_to_none_not_zero(self):
@@ -141,7 +141,7 @@ class TestIpmiDecode(unittest.TestCase):
 
     def test_failed_ipmitool_is_none(self):
         with mock.patch(
-            "tyanfan.ipmi.subprocess.run", return_value=FakeProc("", returncode=1)
+            "p2afan.ipmi.subprocess.run", return_value=FakeProc("", returncode=1)
         ):
             self.assertIsNone(ipmi.read_raw(0x20))
 
@@ -206,7 +206,7 @@ class TestSourceBuild(unittest.TestCase):
 
 
 class FakePwm:
-    """Stand-in for tyanfan.pwm.Pwm reflecting this chassis's factory state."""
+    """Stand-in for p2afan.pwm.Pwm reflecting this chassis's factory state."""
 
     def __init__(self, enabled="ABCDEFG", falls=None):
         self.enabled_set = set(enabled)

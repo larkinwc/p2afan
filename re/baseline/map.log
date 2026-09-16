@@ -11,4 +11,4 @@ WARNING: PWMA drives no monitored tach
 WARNING: PWMB drives no monitored tach
 WARNING: PWMC drives no monitored tach
 WARNING: PWMG drives no monitored tach
-wrote /etc/tyanfan/mapping.toml
+wrote /etc/p2afan/mapping.toml

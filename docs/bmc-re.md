@@ -1,7 +1,7 @@
-# Tyan FT77C-B7079 (S7079GM2NR-N) BMC reverse engineering + `tyanfan` notes
+# Tyan FT77C-B7079 (S7079GM2NR-N) BMC reverse engineering + `p2afan` notes
 
-Host: `tyangpu1`, Ubuntu 24.04, kernel `7.1.3-ga100bar1-tyan`.
-BMC: ASPEED AST2400, Tyan firmware rev **9.01**, LAN `192.168.1.105`.
+Host: `<host>`, Ubuntu 24.04, kernel `7.1.3-ga100bar1-tyan`.
+BMC: ASPEED AST2400, Tyan firmware rev **9.01**, LAN `<bmc-ip>`.
 All measurements below were taken on that machine; every number is reproducible
 with the CLI in this repo.
 
@@ -10,7 +10,7 @@ with the CLI in this repo.
 The factory BMC ramps the six chassis fans from its own NVIDIA-GPU temperature
 sensors (`GPU0..7_Core0_TEMP`). Any card the BMC cannot read — an AMD Radeon
 Pro V340, for instance — contributes nothing to the fan decision, and there is
-no OEM IPMI command on this firmware to override the duty. `tyanfan` therefore
+no OEM IPMI command on this firmware to override the duty. `p2afan` therefore
 drives the AST2400 PWM duty registers **from the host** over the ASPEED
 PCIe-to-AHB (P2A) bridge, using any temperature source you can name.
 
@@ -26,8 +26,8 @@ The ASPEED VGA function `0000:0c:00.0` exposes BAR1 = 128 KiB at `c7000000`
 | `0x10000`–`0x1ffff` | 64 KiB window onto AHB at that base | — |
 
 `CONFIG_STRICT_DEVMEM=y` is irrelevant: this is the PCI sysfs resource, not
-`/dev/mem`. `tyanfan/ahb.py` mmaps it, takes an exclusive `flock` on
-`/run/tyanfan/p2a.lock` (mandatory even for reads — every access re-points the
+`/dev/mem`. `p2afan/ahb.py` mmaps it, takes an exclusive `flock` on
+`/run/p2afan/p2a.lock` (mandatory even for reads — every access re-points the
 shared window register), and restores `0xf004` on exit.
 
 Measured P2A read throughput: **~0.3 MiB/s** (16 MiB flash dump in 54 s).
@@ -60,7 +60,7 @@ Register offsets and the duty-field layout follow the mainline driver
 of the pair in bits `15:0` (rise `7:0`, fall `15:8`), the second in `31:16`.
 With rise = 0, duty = fall/256, so factory `0x33` = 20 % and `0xff` = 100 %.
 
-`tyanfan` writes **only** the four `DUTY` registers, and only one 16-bit half
+`p2afan` writes **only** the four `DUTY` registers, and only one 16-bit half
 at a time (`pwm.apply_fall`). `CTRL`, `CTRL_EXT`, `CLK_CTRL` and the `TYPE*`
 registers are never touched, which is why the BMC's own thermal loop stays
 alive underneath and resumes authority the moment the duty bytes are restored.
@@ -89,7 +89,7 @@ Duty→RPM response measured across the range: `0x33` (20 %) → 2880–3240 RPM
 
 ## 4. Channel → fan mapping (Step 4 measurement)
 
-`tyanfan map` raised one channel at a time to `0x99` (60 %) for 10 s and
+`p2afan map` raised one channel at a time to `0x99` (60 %) for 10 s and
 attributed any fan gaining ≥ 400 RPM (`re/baseline/map.log`):
 
 | Channel | Fans | Evidence |
@@ -107,7 +107,7 @@ So all six monitored fans are attributed to exactly one channel each, on three
 channels. PWMA–PWMC are **enabled and factory-driven at the same `0x33`** but
 have no tach of their own; PWMG is enabled yet parked at duty 0.
 
-`tyanfan` therefore drives **A–F**: the three mapped channels plus the three
+`p2afan` therefore drives **A–F**: the three mapped channels plus the three
 factory-driven untached ones (`control.writable_channels`). Rationale: leaving
 A–C pinned at 20 % while D–F ramp would strand any untached header, and since
 the duty floor equals the factory idle, carrying them can only add airflow
@@ -220,7 +220,7 @@ them), the daemon logged the `0x80` rejections, and fans stayed at ~3000 RPM.
 
 ## 8. Flash dump
 
-`tyanfan dump-flash` points the P2A window at the FMC CE0 memory-mapped region
+`p2afan dump-flash` points the P2A window at the FMC CE0 memory-mapped region
 (`0x20000000`, FMC `0x1e620000` reg0 = `0x801f000a`, CE0 ctrl = `0xb0641`) and
 reads 256 × 64 KiB windows.
 
@@ -243,7 +243,7 @@ switching the FMC to 4-byte addressing.
 
 Reprogramming the FMC of a BMC that is actively booted from that flash was
 judged too risky on this production machine, so it was not attempted. To get
-the upper half safely, dump from inside the BMC (`ssh root@192.168.1.105`, see
+the upper half safely, dump from inside the BMC (`ssh root@<bmc-ip>`, see
 §9.5) or read the chip offline.
 
 The binary is git-ignored (`re/.gitignore`); regenerate it with the command
@@ -326,7 +326,7 @@ The actuation path below it is AMI's `pwmtach` pair, not anything Tyan-specific:
   `ast_pwmtach_set_prescale`, `ast_pwmtach_enable_pwm_control`,
   `ast_pwmtach_trigger_read_fanspeed`, `ast_pwmtach_get_current_speed`,
   `ast_pwmtach_set_tach_property`. **This is the driver writing the very
-  registers `tyanfan` writes** — `ast_pwmtach_set_dutycycle` is the factory
+  registers `p2afan` writes** — `ast_pwmtach_set_dutycycle` is the factory
   path to `0x1E786000 + 0x08/0x0c/0x48/0x4c`.
 - `lib/modules/generic/misc/pwmtach.ko` — `PwmTach Common driver, (c) 2009
   American Megatrends Inc.`, registers char device `pwmtach`
@@ -366,7 +366,7 @@ What *is* available is the firmware's own limit set, read live from the SDR
 (`ipmitool sensor get`), which is what the shipped `config.toml` is calibrated
 against:
 
-| Sensor | Firmware upper critical | `tyanfan` zone critical |
+| Sensor | Firmware upper critical | `p2afan` zone critical |
 |---|---|---|
 | `GPU0..7_Core0_TEMP` | 87 °C | 85 °C (`gpu`) |
 | `CPU0/1_DTS_Temp` | 85 °C | 83 °C (`cpu`) |
@@ -446,9 +446,9 @@ source covers it precisely once the host can read it.
 
 The BMC also runs OpenSSH 6.0p1 Debian-4 on port 22 (host keys `ssh-rsa`,
 `ssh-dss`; auth `publickey,password`), with 80/443/623 open, and IPMI users
-`root` (id 2) and `ga100rec` (id 3). Set a password from the host with
+`root` (id 2) and a second vendor account (id 3). Set a password from the host with
 `ipmitool user set password 2`, log in with
-`ssh -oHostKeyAlgorithms=+ssh-rsa root@192.168.1.105`, and the same registers
+`ssh -oHostKeyAlgorithms=+ssh-rsa root@<bmc-ip>`, and the same registers
 are reachable through the BMC's own `/dev/mem`. This is also the safe route to
 dump the upper half of the flash (§8). Not required for normal operation.
 
@@ -456,24 +456,24 @@ dump the upper half of the flash (§8). Not required for normal operation.
 ## 10. Operating notes
 
 ```
-tyanfan pwm-dump            # ASPEED PWM/tach registers + per-channel duty
-tyanfan sensors             # every known BMC sensor, temps and fan RPM
-tyanfan get / set <pct>     # read / write duty directly (service must be stopped)
-tyanfan map                 # regenerate /etc/tyanfan/mapping.toml
-tyanfan status [--json]     # last daemon state, needs no P2A lock
-tyanfan release             # restore pre-takeover duty, BMC resumes control
-tyanfan failsafe            # slam every driven channel to failsafe duty
-tyanfan dump-flash          # 16 MiB BMC SPI flash over P2A
-tyanfan ahb-read <addr>     # raw AHB dwords, for further RE
+p2afan pwm-dump            # ASPEED PWM/tach registers + per-channel duty
+p2afan sensors             # every known BMC sensor, temps and fan RPM
+p2afan get / set <pct>     # read / write duty directly (service must be stopped)
+p2afan map                 # regenerate /etc/p2afan/mapping.toml
+p2afan status [--json]     # last daemon state, needs no P2A lock
+p2afan release             # restore pre-takeover duty, BMC resumes control
+p2afan failsafe            # slam every driven channel to failsafe duty
+p2afan dump-flash          # 16 MiB BMC SPI flash over P2A
+p2afan ahb-read <addr>     # raw AHB dwords, for further RE
 ```
 
 - The daemon holds the P2A lock for its lifetime, so register-touching CLI
   commands fail after `--lock-wait` seconds (default 3) with a clear message.
-  `tyanfan status` reads `/run/tyanfan/state.json` and never needs the lock.
-- `systemctl stop tyanfan` restores the factory duty bytes via `ExecStopPost`;
+  `p2afan status` reads `/run/p2afan/state.json` and never needs the lock.
+- `systemctl stop p2afan` restores the factory duty bytes via `ExecStopPost`;
   any unclean exit (signal, watchdog, non-zero exit) drives every owned channel
   to `failsafe_duty_pct` instead and logs CRITICAL.
-- `/run/tyanfan/state.json` carries `baseline_duty`, the pre-takeover duty. It
+- `/run/p2afan/state.json` carries `baseline_duty`, the pre-takeover duty. It
   is boot-scoped, and the daemon prefers it over the live registers at startup
   precisely so a crash-restart cannot latch the failsafe `0xff` as "baseline"
   and later strand the fans at 100 %.

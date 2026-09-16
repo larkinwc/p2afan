@@ -1,0 +1,5 @@
+#!/bin/sh
+# Exec shim: run the p2afan CLI from /opt/p2afan with no install step.
+PYTHONPATH=/opt/p2afan${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH
+exec /usr/bin/python3 -u -m p2afan.cli "$@"

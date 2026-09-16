@@ -7,7 +7,7 @@ down_slew_pct_per_tick = 3
 hold_interval = 0.0   # >0 re-asserts duty between ticks at this period
 
 # Channels driven by the controller. Empty = auto: every channel that
-# /etc/tyanfan/mapping.toml attributes a tach to (D, E, F here) plus every
+# /etc/p2afan/mapping.toml attributes a tach to (D, E, F here) plus every
 # other enabled channel the factory firmware drives at duty > 0 (A, B, C).
 # PWMG (parked at duty 0) and PWMH (disabled) are never written.
 write_channels = []

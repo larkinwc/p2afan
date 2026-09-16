@@ -1,9 +1,9 @@
 # Tyan S7079 / FT77C-B7079 BMC firmware findings (AST2400, Tyan FW 9.01)
 
-Source: `/opt/tyanfan/re/flash-16m.bin` — 16777216 bytes,
+Source: `/opt/p2afan/re/flash-16m.bin` — 16777216 bytes,
 sha256 `d25c058c336f0f946dd256e76eeec701854f256328501332de6142c0d4acf2cd`.
 All offsets are byte offsets into this file (= flash physical addresses for a 16 MiB image).
-Extraction root on this host: `/opt/tyanfan/re/extracted/`
+Extraction root on this host: `/opt/p2afan/re/extracted/`
 (`cramfs.img` = carve of `flash-16m.bin[0xA50040:]`,
 `jffs_*.jffs2` = carved JFFS2 slices, `cramfs_root/` = partial 7z salvage,
 `jffs_*_out/` = jefferson outputs, `tiny/` = hand-picked intact small files).

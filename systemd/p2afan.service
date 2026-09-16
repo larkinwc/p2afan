@@ -1,5 +1,5 @@
 [Unit]
-Description=Tyan B7079 host-side fan controller
+Description=Host-side ASPEED BMC fan controller
 ConditionPathExists=/sys/bus/pci/devices/0000:0c:00.0/resource1
 After=multi-user.target
 
@@ -7,8 +7,8 @@ After=multi-user.target
 Type=notify
 NotifyAccess=main
 WatchdogSec=30
-ExecStart=/opt/tyanfan/bin/tyanfan daemon
-ExecStopPost=/opt/tyanfan/bin/tyanfan stop-post
+ExecStart=/opt/p2afan/bin/p2afan daemon
+ExecStopPost=/opt/p2afan/bin/p2afan stop-post
 Restart=always
 RestartSec=5
 

@@ -2,9 +2,9 @@
 """Step 3 evidence script: prove host-side PWM writes move the fans, and
 characterise whether the BMC fights back.
 
-Not part of the daemon. Run as root with the tyanfan service stopped:
+Not part of the daemon. Run as root with the p2afan service stopped:
 
-    sudo PYTHONPATH=/opt/tyanfan python3 /opt/tyanfan/re/actuation_test.py
+    sudo PYTHONPATH=/opt/p2afan python3 /opt/p2afan/re/actuation_test.py
 
 Sequence: snapshot duty registers -> raise every enabled channel A..F to 0x66
 (40 %, always above the factory 0x33 idle, so this can only add airflow) ->
@@ -17,8 +17,8 @@ from __future__ import annotations
 import sys
 import time
 
-from tyanfan import ipmi, pwm
-from tyanfan.ahb import Ahb
+from p2afan import ipmi, pwm
+from p2afan.ahb import Ahb
 
 TARGET = 0x66
 DURATION = 60.0

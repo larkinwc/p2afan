@@ -15,14 +15,14 @@ from .ahb import RUN_DIR, Ahb
 from .curve import Curve, Zone
 from .sources import build as build_source
 
-CONFIG_PATH = "/etc/tyanfan/config.toml"
-MAPPING_PATH = "/etc/tyanfan/mapping.toml"
+CONFIG_PATH = "/etc/p2afan/config.toml"
+MAPPING_PATH = "/etc/p2afan/mapping.toml"
 STATE_PATH = RUN_DIR + "/state.json"
 
 # Bounded so a stuck holder surfaces as a service failure instead of a hang.
 DAEMON_LOCK_WAIT = 30.0
 
-LOG = logging.getLogger("tyanfan")
+LOG = logging.getLogger("p2afan")
 
 # Sensors written in inject mode: the factory curve's NVIDIA GPU inputs.
 INJECT_SENSORS = (0x20, 0x22, 0x24, 0x26)
@@ -180,7 +180,7 @@ def choose_baseline(
     The live registers are the factory values only on a cold start. After a
     crash-restart they are whatever ExecStopPost left behind (failsafe 0xff),
     so latching them would make the next clean stop strand the fans at 100 %.
-    /run/tyanfan/state.json is boot-scoped, so a baseline recorded there came
+    /run/p2afan/state.json is boot-scoped, so a baseline recorded there came
     from a run that started before us and is the better answer; a reboot wipes
     it and the live registers are genuinely factory again.
     """

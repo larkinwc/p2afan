@@ -27,7 +27,7 @@ WINDOW = 0x10000
 WINDOW_SIZE = 0x10000
 WINDOW_MASK = WINDOW_SIZE - 1
 
-RUN_DIR = "/run/tyanfan"
+RUN_DIR = "/run/p2afan"
 LOCK_PATH = RUN_DIR + "/p2a.lock"
 
 # Sanity-probe target: ASPEED PWM/tach controller.
@@ -94,8 +94,8 @@ class Ahb:
                 if time.monotonic() >= deadline:
                     raise BridgeBusy(
                         f"P2A bridge lock {LOCK_PATH} held by another process "
-                        f"after {timeout:g}s; stop tyanfan.service first "
-                        f"(`tyanfan status` needs no lock)"
+                        f"after {timeout:g}s; stop p2afan.service first "
+                        f"(`p2afan status` needs no lock)"
                     ) from None
                 time.sleep(0.05)
 
