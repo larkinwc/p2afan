@@ -1,0 +1,5 @@
+#!/bin/sh
+# Exec shim: run the tyanfan CLI from /opt/tyanfan with no install step.
+PYTHONPATH=/opt/tyanfan${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH
+exec /usr/bin/python3 -u -m tyanfan.cli "$@"

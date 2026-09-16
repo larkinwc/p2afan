@@ -1,0 +1,16 @@
+[Unit]
+Description=Tyan B7079 host-side fan controller
+ConditionPathExists=/sys/bus/pci/devices/0000:0c:00.0/resource1
+After=multi-user.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+ExecStart=/opt/tyanfan/bin/tyanfan daemon
+ExecStopPost=/opt/tyanfan/bin/tyanfan stop-post
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

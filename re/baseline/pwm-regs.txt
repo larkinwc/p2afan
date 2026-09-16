@@ -1,0 +1,27 @@
+# ASPEED PWM/tach block @ 0x1e786000 via P2A
+# p2a window (BAR1+0xf004) on entry = 0x1e6e0000
+CTRL          +0x00  0x00fc0f01
+CLK_CTRL      +0x04  0x9c33ff11
+DUTY0         +0x08  0x33003300
+DUTY1         +0x0c  0x33003300
+TYPEM_CTRL    +0x10  0x10000001
+TYPEM_CTRL1   +0x14  0x10000000
+TYPEN_CTRL    +0x18  0x10000001
+TYPEN_CTRL1   +0x1c  0x10000000
+RESULT        +0x2c  0x8000f1f3
+CTRL_EXT      +0x40  0x00000700
+CLK_CTRL_EXT  +0x44  0x0000ff00
+DUTY2         +0x48  0x33003300
+DUTY3         +0x4c  0xff000000
+TYPEO_CTRL    +0x50  0xfff700fe
+TYPEO_CTRL1   +0x54  0xac53b2cd
+# channel  enabled  rise  fall  duty%
+PWMA         yes   0x00  0x33   20.0
+PWMB         yes   0x00  0x33   20.0
+PWMC         yes   0x00  0x33   20.0
+PWMD         yes   0x00  0x33   20.0
+PWME         yes   0x00  0x33   20.0
+PWMF         yes   0x00  0x33   20.0
+PWMG         yes   0x00  0x00    0.0
+PWMH         no    0x00  0xff  100.0
+# tach channels enabled: 2,3,4,5,6,7

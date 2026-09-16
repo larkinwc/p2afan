@@ -1,0 +1,70 @@
+CPU0_DTS_Temp    | 01h | ok  |  3.0 | 37 degrees C
+CPU0_PECI_Value  | 03h | ok  |  3.0 | -50 unspecified
+CPU1_DTS_Temp    | 02h | ok  |  3.1 | 35 degrees C
+CPU1_PECI_Value  | 04h | ok  |  3.1 | -52 unspecified
+SYS_Air_Inlet    | 06h | ok  |  7.0 | 23 degrees C
+MB_Air_Inlet     | 07h | ok  |  7.0 | 25 degrees C
+SYS_Air_Outlet   | 08h | ok  |  7.0 | 31 degrees C
+LAN_Area_Temp    | 05h | ok  |  7.0 | 35 degrees C
+PCH_Temp         | 0Ah | ok  |  7.0 | 31 degrees C
+CPU0_DIMM_A0     | 41h | ok  |  7.0 | 26 degrees C
+CPU0_DIMM_A1     | 42h | ns  |  7.0 | No Reading
+CPU0_DIMM_A2     | 43h | ns  |  7.0 | No Reading
+CPU0_DIMM_B0     | 44h | ok  |  7.0 | 25 degrees C
+CPU0_DIMM_B1     | 45h | ns  |  7.0 | No Reading
+CPU0_DIMM_B2     | 46h | ns  |  7.0 | No Reading
+CPU0_DIMM_C0     | 47h | ns  |  7.0 | No Reading
+CPU0_DIMM_C1     | 48h | ns  |  7.0 | No Reading
+CPU0_DIMM_C2     | 49h | ns  |  7.0 | No Reading
+CPU0_DIMM_D0     | 4Ah | ok  |  7.0 | 25 degrees C
+CPU0_DIMM_D1     | 4Bh | ns  |  7.0 | No Reading
+CPU0_DIMM_D2     | 4Ch | ns  |  7.0 | No Reading
+CPU1_DIMM_A0     | 4Dh | ok  |  7.0 | 27 degrees C
+CPU1_DIMM_A1     | 4Eh | ns  |  7.0 | No Reading
+CPU1_DIMM_A2     | 4Fh | ns  |  7.0 | No Reading
+CPU1_DIMM_B0     | 50h | ok  |  7.0 | 25 degrees C
+CPU1_DIMM_B1     | 51h | ns  |  7.0 | No Reading
+CPU1_DIMM_B2     | 52h | ns  |  7.0 | No Reading
+CPU1_DIMM_C0     | 53h | ok  |  7.0 | 25 degrees C
+CPU1_DIMM_C1     | 54h | ns  |  7.0 | No Reading
+CPU1_DIMM_C2     | 55h | ns  |  7.0 | No Reading
+CPU1_DIMM_D0     | 56h | ok  |  7.0 | 25 degrees C
+CPU1_DIMM_D1     | 57h | ns  |  7.0 | No Reading
+CPU1_DIMM_D2     | 58h | ns  |  7.0 | No Reading
+GPU0_Core0_TEMP  | 20h | ok  |  7.0 | 34 degrees C
+GPU0_Core1_TEMP  | 21h | ns  |  7.0 | No Reading
+GPU1_Core0_TEMP  | 22h | ok  |  7.0 | 35 degrees C
+GPU1_Core1_TEMP  | 23h | ns  |  7.0 | No Reading
+GPU2_Core0_TEMP  | 24h | ok  |  7.0 | 37 degrees C
+GPU2_Core1_TEMP  | 25h | ns  |  7.0 | No Reading
+GPU3_Core0_TEMP  | 26h | ok  |  7.0 | 36 degrees C
+GPU3_Core1_TEMP  | 27h | ns  |  7.0 | No Reading
+GPU4_Core0_TEMP  | 28h | ok  |  7.0 | 34 degrees C
+GPU4_Core1_TEMP  | 29h | ns  |  7.0 | No Reading
+GPU5_Core0_TEMP  | 2Ah | ok  |  7.0 | 36 degrees C
+GPU5_Core1_TEMP  | 2Bh | ns  |  7.0 | No Reading
+GPU6_Core0_TEMP  | 2Ch | ok  |  7.0 | 35 degrees C
+GPU6_Core1_TEMP  | 2Dh | ns  |  7.0 | No Reading
+GPU7_Core0_TEMP  | 2Eh | ok  |  7.0 | 36 degrees C
+GPU7_Core1_TEMP  | 2Fh | ns  |  7.0 | No Reading
+VCCP_CPU0        | 10h | ok  |  3.0 | 1.78 Volts
+VDDQ_CPU0        | 12h | ok  |  3.0 | 1.21 Volts
+VCCP_CPU1        | 13h | ok  |  3.1 | 1.78 Volts
+VDDQ_CPU1        | 15h | ok  |  3.1 | 1.20 Volts
+VPP_DDR_CD       | 11h | ok  |  7.0 | 2.34 Volts
+VPP_DDR_EF       | 14h | ok  |  3.1 | 2.34 Volts
+1.05V_PCH        | 1Dh | ok  |  7.0 | 1.03 Volts
+1.5V_PCH         | 1Ch | ok  |  7.0 | 1.48 Volts
+VCCIO            | 16h | ok  |  7.0 | 1.04 Volts
+12V              | 17h | ok  |  7.0 | 11.71 Volts
+5V               | 18h | ok  |  7.0 | 5.13 Volts
+3V               | 19h | ok  |  7.0 | 3.31 Volts
+V_RTC_BAT        | 1Bh | ok  |  7.0 | 2.81 Volts
+3V_STBY          | 1Eh | ok  |  7.0 | 3.33 Volts
+5V_STBY          | 1Ah | ok  |  7.0 | 5.16 Volts
+SYS_FAN_1        | 32h | ok  |  7.0 | 3060 RPM
+SYS_FAN_2        | 33h | ok  |  7.0 | 3240 RPM
+SYS_FAN_3        | 34h | ok  |  7.0 | 3150 RPM
+SYS_FAN_4        | 35h | ok  |  7.0 | 2880 RPM
+SYS_FAN_5        | 36h | ok  |  7.0 | 2970 RPM
+SYS_FAN_6        | 37h | ok  |  7.0 | 2880 RPM

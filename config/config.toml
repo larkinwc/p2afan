@@ -1,0 +1,52 @@
+mode = "pwm"          # "pwm" = write ASPEED duty directly; "inject" = feed BMC sensors instead
+inject = false        # in pwm mode, also mirror zone temps into BMC GPU sensors
+tick_seconds = 5.0
+min_duty_pct = 20
+failsafe_duty_pct = 100
+down_slew_pct_per_tick = 3
+hold_interval = 0.0   # >0 re-asserts duty between ticks at this period
+
+# Channels driven by the controller. Empty = auto: every channel that
+# /etc/tyanfan/mapping.toml attributes a tach to (D, E, F here) plus every
+# other enabled channel the factory firmware drives at duty > 0 (A, B, C).
+# PWMG (parked at duty 0) and PWMH (disabled) are never written.
+write_channels = []
+
+[[zone]]
+name = "gpu"
+critical_c = 85
+hysteresis_c = 3
+curve = [[50, 30], [65, 50], [78, 80], [85, 100]]
+sources = [
+  { kind = "ipmi", name = "GPU0", sensor = 0x20 },
+  { kind = "ipmi", name = "GPU1", sensor = 0x22 },
+  { kind = "ipmi", name = "GPU2", sensor = 0x24 },
+  { kind = "ipmi", name = "GPU3", sensor = 0x26 },
+  { kind = "ipmi", name = "GPU4", sensor = 0x28 },
+  { kind = "ipmi", name = "GPU5", sensor = 0x2a },
+  { kind = "ipmi", name = "GPU6", sensor = 0x2c },
+  { kind = "ipmi", name = "GPU7", sensor = 0x2e },
+]
+
+[[zone]]
+name = "cpu"
+critical_c = 88
+hysteresis_c = 3
+curve = [[45, 25], [60, 45], [75, 80], [88, 100]]
+sources = [
+  { kind = "ipmi", name = "CPU0", sensor = 0x01 },
+  { kind = "ipmi", name = "CPU1", sensor = 0x02 },
+  { kind = "ipmi", name = "PCH",  sensor = 0x0a },
+]
+
+# Universal backstop: any hot card with no readable telemetry still heats the
+# exhaust, so outlet air alone can carry the ramp. This is the zone that covers
+# an AMD V340 before/without a working host driver.
+[[zone]]
+name = "exhaust"
+critical_c = 60
+hysteresis_c = 2
+curve = [[38, 20], [45, 45], [52, 75], [60, 100]]
+sources = [
+  { kind = "ipmi", name = "OUTLET", sensor = 0x08 },
+]
