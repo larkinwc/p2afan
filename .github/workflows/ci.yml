@@ -1,0 +1,102 @@
+name: Safety and releases
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  safety:
+    name: Safety / Python ${{ matrix.python }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Hardware-free safety tests and CLI
+        run: |
+          python -m unittest discover -s tests -v
+          ./bin/p2afan --version
+          ./bin/p2afan --help
+          ./bin/p2afan --config config/config.toml check-config --mapping /tmp/p2afan-missing-mapping.toml
+      - name: Installer staging smoke
+        run: python scripts/smoke_distribution.py .
+
+  source-package:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build and smoke extracted source package
+        run: |
+          python scripts/build_release.py --kind source
+          temp=$(mktemp -d)
+          tar -xzf dist/p2afan-*-source.tar.gz -C "$temp"
+          python scripts/smoke_distribution.py "$temp"/p2afan-*-source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-package
+          path: dist/*
+
+  binary-package:
+    # Build on the oldest supported glibc: Ubuntu 22.04 / glibc 2.35.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned standalone build dependencies
+        run: python -m pip install -r scripts/requirements-build.txt
+      - name: Build bundles and validate release tags
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) python scripts/build_release.py --tag "$GITHUB_REF_NAME" ;;
+            *) python scripts/build_release.py ;;
+          esac
+      - name: Smoke isolated binary and source bundles
+        run: |
+          temp=$(mktemp -d)
+          tar -xzf dist/p2afan-*-linux-x86_64.tar.gz -C "$temp"
+          tar -xzf dist/p2afan-*-source.tar.gz -C "$temp"
+          env -u PYTHONPATH python scripts/smoke_distribution.py "$temp"/p2afan-*-linux-x86_64
+          env -u PYTHONPATH python scripts/smoke_distribution.py "$temp"/p2afan-*-source
+          (cd dist && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bundles
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [safety, source-package, binary-package]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-bundles
+          path: dist
+      - name: Upload versioned release archives and checksums
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/p2afan-*-source.tar.gz
+            dist/p2afan-*-linux-x86_64.tar.gz
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
+          body: See the release notes and safety/upgrade instructions in README.md for this tag.

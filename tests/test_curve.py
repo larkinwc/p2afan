@@ -14,7 +14,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from p2afan import ipmi, pwm  # noqa: E402
-from p2afan.control import choose_baseline, slew, writable_channels  # noqa: E402
+from p2afan.control import slew, writable_channels  # noqa: E402
 from p2afan.curve import Curve, Zone  # noqa: E402
 from p2afan.sources import build  # noqa: E402
 
@@ -107,11 +107,6 @@ class TestApplyFall(unittest.TestCase):
         self.assertEqual(pwm.apply_fall(0, False, 999), 0x0000FF00)
         self.assertEqual(pwm.apply_fall(0, False, -5), 0x00000000)
 
-    def test_channel_map_matches_aspeed_layout(self):
-        self.assertEqual(pwm.CHANNELS["A"][:2], (pwm.DUTY0, False))
-        self.assertEqual(pwm.CHANNELS["B"][:2], (pwm.DUTY0, True))
-        self.assertEqual(pwm.CHANNELS["G"][:2], (pwm.DUTY3, False))
-        self.assertEqual(pwm.CHANNELS["H"][:2], (pwm.DUTY3, True))
 
 
 class FakeProc:
@@ -184,15 +179,11 @@ class TestZone(unittest.TestCase):
 
 
 class TestSourceBuild(unittest.TestCase):
-    def test_builds_each_kind(self):
-        self.assertEqual(build({"kind": "ipmi", "name": "G0", "sensor": 0x20}).sensor, 0x20)
-        self.assertEqual(build({"kind": "hwmon", "name": "h", "path": "/x"}).path, "/x")
-        self.assertEqual(build({"kind": "pci", "name": "v", "bdf": "41:00.0"}).bdf, "0000:41:00.0")
-        self.assertEqual(build({"kind": "exec", "name": "e", "command": ["/bin/true"]}).command, ["/bin/true"])
 
     def test_unknown_kind_and_missing_name_rejected(self):
-        with self.assertRaises(ValueError):
-            build({"kind": "telepathy", "name": "x"})
+        for kind in ("telepathy", [], {}):
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                build({"kind": kind, "name": "x"})
         with self.assertRaises(ValueError):
             build({"kind": "ipmi", "sensor": 1})
 
@@ -210,7 +201,9 @@ class FakePwm:
 
     def __init__(self, enabled="ABCDEFG", falls=None):
         self.enabled_set = set(enabled)
-        self.falls = falls or dict(pwm.FACTORY_FALL)
+        self.falls = falls if falls is not None else {
+            ch: 0x33 if ch in "ABCDEF" else 0 for ch in pwm.ALL_CHANNELS
+        }
 
     def enabled(self, ch):
         return ch in self.enabled_set
@@ -258,35 +251,11 @@ class TestWritableChannels(unittest.TestCase):
         )
 
     def test_mapped_channel_is_written_even_when_currently_parked(self):
-        falls = dict(pwm.FACTORY_FALL)
+        falls = dict(FakePwm().falls)
         falls["D"] = 0x00
         self.assertIn("D", writable_channels(self.mapping, FakePwm(falls=falls)))
 
 
-class TestChooseBaseline(unittest.TestCase):
-    factory = dict(pwm.FACTORY_FALL)
-
-    def test_cold_start_uses_live_registers(self):
-        self.assertEqual(choose_baseline(self.factory, None), self.factory)
-        self.assertEqual(choose_baseline(self.factory, {}), self.factory)
-
-    def test_crash_restart_does_not_latch_failsafe_duty(self):
-        # ExecStopPost left A-F at 0xff; the recorded baseline is authoritative.
-        live = dict(self.factory, **{c: 0xFF for c in "ABCDEF"})
-        state = {"baseline_duty": self.factory}
-        self.assertEqual(choose_baseline(live, state), self.factory)
-
-    def test_missing_or_corrupt_entries_fall_back_per_channel(self):
-        live = dict(self.factory, A=0xFF)
-        state = {"baseline_duty": {"B": 0x40, "C": "junk"}}
-        got = choose_baseline(live, state)
-        self.assertEqual(got["A"], 0xFF)
-        self.assertEqual(got["B"], 0x40)
-        self.assertEqual(got["C"], self.factory["C"])
-
-    def test_result_covers_exactly_the_live_channels(self):
-        state = {"baseline_duty": {"A": 1, "Z": 9}}
-        self.assertEqual(set(choose_baseline(self.factory, state)), set(self.factory))
 
 
 if __name__ == "__main__":

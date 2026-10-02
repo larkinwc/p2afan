@@ -1,3 +1,5 @@
+# Reference profile only: verify sensor IDs, RPM scaling, and idle duty on your board.
+pci_bdf = "0000:0c:00.0" # ASPEED VGA function, not the upstream PCI bridge
 mode = "pwm"          # "pwm" = write ASPEED duty directly; "inject" = feed BMC sensors instead
 inject = false        # in pwm mode, also mirror zone temps into BMC GPU sensors
 tick_seconds = 5.0

@@ -35,8 +35,8 @@ full reverse-engineering writeup.
 | ASPEED BMC (AST2400/2500) | the PWM block and P2A bridge live in it | `lspci -d 1a03:` shows a VGA function |
 | P2A bridge enabled and unlocked | the only host path to the BMC's bus | `p2afan pwm-dump` (below) |
 | root | BAR1 via PCI sysfs is mode `0600` | — |
-| Python **3.11+** | `tomllib` is used for config; stdlib only, no pip | `python3 -V` |
-| `ipmitool` + `/dev/ipmi0` | reading BMC sensors and fan tachs | `sudo ipmitool sdr elist full` |
+| Python **3.11–3.14** (source install only) | stdlib-only runtime; selected `python3` must be 3.11+ | `python3 -V` |
+| `ipmitool` + `/dev/ipmi0` | BMC sensors, fan mapping, RPM checks, and injection; needed even with a standalone binary | `sudo ipmitool sdr elist full` |
 
 On Debian/Ubuntu:
 
@@ -60,18 +60,21 @@ lspci -d 1a03:
 # 0c:00.0 VGA compatible controller: ASPEED Graphics ...  <- this one
 ```
 
-The address is currently a constant in `p2afan/ahb.py`. If yours is not
-`0000:0c:00.0`:
+Set `pci_bdf = "0000:0c:00.0"` in `/etc/p2afan/config.toml` to your ASPEED
+VGA function's address. No source or service-unit edits are needed. The default
+is the reference chassis address; short addresses such as `0c:00.0` are
+normalized to domain `0000`. A one-command override is available:
 
 ```sh
-sudo sed -i 's|0000:0c:00.0|0000:<your-bdf>|' /opt/p2afan/p2afan/ahb.py
+sudo p2afan --bdf 0000:0c:00.0 pwm-dump
 ```
 
-Then the read-only smoke test — this writes nothing:
+Then inspect the registers and sensors (no duty writes; register reads still
+repoint the shared P2A window):
 
 ```sh
-sudo /opt/p2afan/bin/p2afan pwm-dump    # PWM/tach registers + per-channel duty
-sudo /opt/p2afan/bin/p2afan sensors     # BMC temps and fan RPM
+sudo p2afan pwm-dump     # PWM/tach registers + per-channel duty
+sudo p2afan sensors      # BMC temps and fan RPM
 ```
 
 You are in business if `pwm-dump` prints a non-zero `CTRL` with bit 0 set
@@ -96,78 +99,180 @@ the service for anything that touches registers:
 
 ## Install
 
+Install only from a local, inspected checkout or extracted release archive.
+There is no network download in the installer and no curl-to-root command.
+Both package types use the same installer:
+
 ```sh
-sudo git clone https://github.com/larkinwc/p2afan /opt/p2afan
-sudo install -d -m 755 /etc/p2afan
-sudo cp /opt/p2afan/config/config.toml /etc/p2afan/config.toml
+git clone https://github.com/larkinwc/p2afan
+cd p2afan
+sudo ./install.sh
 ```
 
-**Now edit `/etc/p2afan/config.toml` before going any further.** The shipped
-file is the reference chassis: its zones use Tyan B7079 IPMI sensor numbers
-(`0x20`–`0x2e` for GPUs, `0x01`/`0x02` for CPU DTS, `0x08` for the outlet) and
-its `critical_c` values sit just under *that* firmware's SDR limits. Wrong
-sensor numbers on your board mean a zone with no valid reading, which trips
-failsafe and runs your fans at 100 % forever. Cross-check every `sensor =`
-against your own `p2afan sensors` output, and set `min_duty_pct` to your
-measured factory idle.
+It installs the CLI at `/usr/local/bin/p2afan`, the payload at `/opt/p2afan`,
+and the unit at `/etc/systemd/system/p2afan.service`. It **never enables or
+starts the service**. Live installation requires root, Linux, systemd, and
+`ipmitool`; source installation also requires `python3` 3.11+. The standalone
+Linux x86_64 binary needs no system Python but still needs `ipmitool` for
+BMC sensors, fan mapping and RPM checks. If your distro's Python is older
+(Ubuntu 22.04 defaults to 3.10), use the standalone binary or provide a
+supported `python3` on both your shell and systemd service `PATH`, using a
+systemd override. The installer does not change your system interpreter.
+
+**A fresh install creates only `/etc/p2afan/config.toml.example`, not an active
+config.** Existing `config.toml`, `mapping.toml`, and examples are preserved.
+Copy the example explicitly, then edit it before any actuation:
+
+```sh
+sudo cp /etc/p2afan/config.toml.example /etc/p2afan/config.toml
+sudoedit /etc/p2afan/config.toml
+p2afan --version
+p2afan check-config
+```
+
+The sample is for a Tyan B7079: its GPU sensors are `0x20`–`0x2e`, CPU DTS
+`0x01`/`0x02`, and outlet `0x08`. Its limits are not universal. Cross-check
+every sensor against your own SDR, set `pci_bdf`, derive critical limits, and
+set `min_duty_pct` to your measured safe idle. `check-config` validates config
+and mapping **without opening the P2A bridge, reading sensors, executing
+temperature commands, or changing fan duty**. A missing mapping is a warning,
+not proof your hardware is mapped or safe.
 
 Then map which PWM channel drives which fan:
 
 ```sh
-sudo /opt/p2afan/bin/p2afan map
+sudo p2afan map
+cat /etc/p2afan/mapping.toml
+p2afan check-config
 ```
 
 > [!CAUTION]
-> `map` is the one disruptive step. It raises each channel to 60 % in turn,
-> ~20 s per channel, so expect **2–3 minutes of loud fans**. It restores the
-> entry duty after every probe and again at the end. Run it on an idle machine,
-> and never while the service is running. It refuses to overwrite an existing
-> `/etc/p2afan/mapping.toml` without `--force`.
+> `map` is disruptive: it raises each channel to 60 % in turn (~20 s each).
+> Expect **2–3 minutes of loud fans**. It restores entry duty after every probe
+> and at the end. Run on an idle machine with the service stopped. It refuses
+> to overwrite `/etc/p2afan/mapping.toml` without `--force`.
 
-Sanity-check the result — every fan should appear under exactly one channel:
+Optionally prove actuation before handing over to systemd:
 
 ```sh
-cat /etc/p2afan/mapping.toml
+sudo p2afan set 40
+sudo p2afan get
+sudo p2afan release      # restores the captured pre-takeover duty
 ```
 
-Optionally prove actuation by hand before handing over to systemd:
+Finally, explicitly enable and start after checking your configuration:
 
 ```sh
-sudo /opt/p2afan/bin/p2afan set 40     # audibly louder within a few seconds
-sudo /opt/p2afan/bin/p2afan get
-sudo /opt/p2afan/bin/p2afan release    # back to the pre-takeover duty
-```
-
-Finally enable the service:
-
-```sh
-sudo ln -s /opt/p2afan/systemd/p2afan.service /etc/systemd/system/
-sudo systemctl daemon-reload
 sudo systemctl enable --now p2afan
-sudo p2afan status          # or /opt/p2afan/bin/p2afan status
-journalctl -u p2afan -f     # one line per 5 s tick
+sudo p2afan status
+journalctl -u p2afan -f
 ```
 
-`status` should show your expected duty, `failsafe false`, and `overrides 0`. A
-climbing `overrides` count means your BMC *is* rewriting the duty registers
-behind you — set `hold_interval` (e.g. `0.25`) in the config to re-assert faster
-than it corrects.
+`status` should show your expected duty, `failsafe false`, and `overrides 0`.
+A climbing `overrides` count means the BMC is rewriting duty registers; set
+`hold_interval` (e.g. `0.25`) to reassert faster than it corrects.
 
-Put the CLI on your `PATH` if you like: `sudo ln -s /opt/p2afan/bin/p2afan
-/usr/local/bin/p2afan`.
+### Releases and local builds
 
-### Uninstall
+Tagged releases, when published, provide `p2afan-<version>-source.tar.gz`,
+`p2afan-<version>-linux-x86_64.tar.gz`, and `SHA256SUMS` on the
+[releases page](https://github.com/larkinwc/p2afan/releases). These instructions
+do not imply an artifact has already been published. Download locally, verify
+the available files with `sha256sum --ignore-missing -c SHA256SUMS`, inspect,
+extract, and run `sudo ./install.sh` inside the extracted directory. A checksum
+detects corruption; it is not an independent publisher signature.
+
+The standalone bundle is built on **Ubuntu 22.04 x86_64 / glibc 2.35** and
+requires Linux x86_64 with glibc 2.35 or newer; it is not a musl/Alpine binary.
+Source code supports Python 3.11–3.14 and is not restricted to x86_64.
+
+Build locally (no publishing):
 
 ```sh
-sudo systemctl disable --now p2afan     # ExecStopPost restores factory duty
-sudo rm /etc/systemd/system/p2afan.service
-sudo systemctl daemon-reload
-sudo /opt/p2afan/bin/p2afan pwm-dump    # confirm duty is back at your baseline
-sudo rm -rf /opt/p2afan /etc/p2afan
+python3 scripts/build_release.py --kind source
+# For binary/all, build on Ubuntu 22.04 x86_64 with CPython 3.11:
+python3 -m venv .venv-build
+. .venv-build/bin/activate
+python -m pip install -r scripts/requirements-build.txt
+python scripts/build_release.py                # both archives + SHA256SUMS in dist/
 ```
 
-A clean stop hands control back to the BMC's own thermal loop, so there is
-nothing else to undo.
+PyInstaller and its build dependencies are pinned in
+`scripts/requirements-build.txt`. Building on a newer glibc raises the effective
+binary baseline; use the documented build host. CI runs hardware-free safety
+tests and CLI/config/staged-installer smoke checks on Python 3.11–3.14.
+Every push and PR also builds the standalone binary on Ubuntu 22.04 and smokes
+both extracted archives outside the checkout without `PYTHONPATH`. Verified
+archives/checksums are retained as CI artifacts. Publishing is tag-only:
+a `v<version>` tag must equal `p2afan.__version__`, and the release job uploads
+the bundles verified by that run only after all safety/package jobs pass.
+
+For a non-root install rehearsal, with no host changes or `systemctl` calls:
+
+```sh
+DESTDIR="$(mktemp -d)" ./install.sh
+# Or exercise the CLI plus fresh install and preserved-config upgrade:
+python3 scripts/smoke_distribution.py .
+```
+
+### Stopped upgrades
+
+The installer refuses to upgrade while the service is active, activating, or
+stopping. Do not replace files underneath a running daemon. While the old
+installation is still intact:
+
+```sh
+sudo systemctl stop p2afan
+sudo p2afan pwm-dump       # confirm the original baseline was restored
+```
+
+**Upgrading from 1.0:** its clean stop leaves a nonempty, device-unscoped
+`/run/p2afan/state.json`. Version 1.1 refuses that legacy baseline rather than
+guessing which PCI device it belongs to. After stopping the **old** daemon,
+compare the live duty from `pwm-dump` with your recorded factory/pre-takeover
+baseline. Only once restoration is confirmed and no takeover is active, move
+the legacy state aside:
+
+```sh
+sudo mv -n /run/p2afan/state.json /run/p2afan/state-v1.0.json
+```
+
+Do not move state while a daemon or manual takeover is active, or when baseline
+restoration is uncertain. Keep the archive for diagnosis. If that archive name
+already exists, choose an unused name; `mv -n` must not leave the original state
+in place before you proceed. Current device-scoped ownership in
+`/run/p2afan/baseline.json` needs no migration; preserve it through upgrades.
+
+Then install from the inspected new package directory:
+
+```sh
+sudo ./install.sh
+p2afan --version
+p2afan check-config
+sudo systemctl start p2afan
+```
+
+Config and mapping are never overwritten; review new example/settings and
+release notes manually. Stop any manually launched daemon too: the installer
+checks systemd's service state, not arbitrary processes. Installation reloads
+the unit but never starts or enables it, even on an upgrade.
+
+### Removal
+
+Stop using the still-installed CLI/unit so baseline restoration can complete,
+then inspect the duty before removing code:
+
+```sh
+sudo systemctl disable --now p2afan
+sudo p2afan pwm-dump
+sudo rm /etc/systemd/system/p2afan.service /usr/local/bin/p2afan
+sudo systemctl daemon-reload
+sudo rm -rf /opt/p2afan
+```
+
+This intentionally **preserves `/etc/p2afan/config.toml`, the mapping, and any
+examples**, plus boot-scoped recovery state. A clean stop restores the captured
+baseline; if restoration fails, investigate before removing the recovery tool.
 
 ## Configuration
 
@@ -175,6 +280,7 @@ Zones are independent curves; the **highest** duty any zone asks for wins.
 Within a zone, the **hottest** valid source wins. Nothing is ever averaged.
 
 ```toml
+pci_bdf = "0000:0c:00.0"     # ASPEED VGA function, not the upstream PCI bridge
 mode = "pwm"                 # "pwm" writes duty registers; "inject" feeds BMC sensors
 tick_seconds = 5.0
 min_duty_pct = 20            # never quieter than the factory idle
@@ -208,6 +314,10 @@ valid reading goes straight to failsafe. Cold and unknown are never confused.
 ## CLI
 
 ```
+p2afan --version         # package version
+p2afan check-config [--mapping PATH] # validate only; no sensors/register writes
+p2afan --config PATH check-config   # alternate config (default /etc/p2afan/config.toml)
+p2afan --bdf BDF pwm-dump # override configured ASPEED PCI address
 p2afan pwm-dump          # PWM/tach registers + per-channel duty
 p2afan sensors           # every known BMC sensor: temps and fan RPM
 p2afan get               # current duty per channel
@@ -249,10 +359,12 @@ the sibling channel is never disturbed.
 
 ## Safety
 
-Designed so that every failure mode ends in *more* airflow, not less:
+Failure handling prioritizes emergency cooling, but cannot guarantee airflow
+when the bridge, BMC actuator, or fans themselves fail:
 
-- **Duty floor** defaults to the factory idle, so the controller can only add
-  airflow versus stock unless you deliberately lower `min_duty_pct`.
+- **Duty floor** — configured `min_duty_pct` bounds the daemon's requested duty.
+  The sample's 20 % is reference-only, not an automatically measured idle;
+  derive a safe floor for your chassis. Manual `set` is an explicit override.
 - **Critical trip** — any source at or above its zone's `critical_c` goes to
   `failsafe_duty_pct` on the same tick, bypassing curve and slew.
 - **Sensor loss** — a zone with no valid reading, or a source failing 3 ticks
@@ -264,11 +376,34 @@ Designed so that every failure mode ends in *more* airflow, not less:
 - **Clean stop / SIGTERM** → restores the pre-takeover duty; the BMC resumes.
 - **Crash, SIGKILL, watchdog kill** → `ExecStopPost` drives every owned channel
   to failsafe duty and logs CRITICAL.
-- **Crash-restart** → the baseline is read from the boot-scoped state file, not
-  from the live registers, so a restart after a failsafe cannot latch 100 % as
-  "factory" and strand your fans there.
-- **Never written**: PWM `CTRL`, `CTRL_EXT`, `CLK_CTRL`, `TYPE*`, channels parked
-  at duty 0, and disabled channels.
+- **Crash-restart** — active takeover baselines are persisted before duty writes
+  and scoped to the boot and PCI device. Restart after failsafe cannot latch
+  100 % as "factory". Manual `set`/`set-raw` also capture a baseline first.
+  Ownership lives in `/run/p2afan/baseline.json`, separately from status telemetry
+  in `/run/p2afan/state.json`; injection heartbeats cannot overwrite it.
+- **No guessed restore** — `release` requires the captured baseline for this
+  boot/device; missing or legacy unscoped state is refused rather than applying
+  reference-chassis duty bytes. Ownership clears only after verified restore.
+- **Finite validation** — config values, curves and source specifications are
+  validated before hardware opens. Non-finite temperature readings are missing
+  data, never cold temperatures.
+  Failsafe duty must be positive and at least every configured curve's maximum;
+  when injection is enabled, its failsafe temperature must reach every zone's
+  critical threshold and fit the 8-bit sensor range.
+- **Tach loss** — sustained missing fan telemetry trips failsafe independently
+  of low-RPM strikes; missing readings do not reset stall evidence. Recovery
+  requires consecutive healthy readings.
+- **Actuator failures** — required sensor injection failures prevent readiness
+  and fail the daemon. Optional PWM-mode mirroring errors appear in `status` as
+  `inject errors` without discarding successful PWM control. Invalid mapping or
+  unwritable baseline storage cannot block emergency PWM writes. If full config
+  validation fails, emergency control uses a valid raw actuator identity with
+  safe defaults; without a trustworthy identity it attempts IPMI injection, not
+  a guessed PCI device. Injection fallback is unavailable on Tyan firmware 9.01.
+- **Register scope** — PWM `CTRL`, `CTRL_EXT`, `CLK_CTRL`, and `TYPE*` are never
+  written. Auto-selected daemon channels exclude disabled and duty-zero
+  channels; explicit channel selections, manual writes, and mapping can target
+  enabled duty-zero channels.
 
 ## Reference platform results
 
@@ -279,11 +414,17 @@ Tyan FT77C-B7079, AST2400, firmware 9.01, six chassis fans on PWMD/E/F:
 | `0x33` 20 % | 18 540 | factory idle |
 | `0x4c` 30 % | ~22 000 | typical `p2afan` idle |
 | `0x99` 60 % | ~31 000 | |
-| `0xff` 100 % | 38 790 | **2.09× factory airflow** |
+| `0xff` 100 % | 38 790 | **2.09× reported total RPM**, not a measured airflow ratio |
 
 Spin-up is audible in ~2 s and settled in ~4.5 s. Duty writes held for 60 s and
 30 s tests with zero reverts — the BMC does not fight back on this firmware. If
 yours does, set `hold_interval` to re-assert faster than it corrects.
+
+The hard-coded BMC sensor catalogue, **90 RPM per raw fan count** conversion,
+and 1 °C per temperature count are reference-firmware assumptions, not generic
+SDR decoding. Validate sensor IDs and scaling against your own SDR and measured
+tach readings before relying on fan mapping, stall detection, or injection.
+Changing config sensor IDs alone does not change the fan catalogue/scaling.
 
 ## Limitations
 
@@ -292,9 +433,29 @@ yours does, set `hold_interval` to re-assert faster than it corrects.
   capabilities `0x68`, i.e. reading-not-settable, so `Set Sensor Reading` returns
   completion code `0x80`. It ships for firmware that does permit it, and it never
   touches the P2A bridge so it remains usable if a BMC locks P2A.
-- The PCI address of the ASPEED function is a constant in `p2afan/ahb.py`.
 - Tested on AST2400 only. AST2500 uses the same PWM block and P2A layout and
   should work; AST2600 moves things and is untested.
+
+## Release notes
+
+### 1.1.0
+
+- Safe local source/binary installer, preserved configuration/mapping, explicit
+  example activation, staged-install support, and stopped-only service upgrades.
+- Versioned source and standalone Linux x86_64 bundles, pinned PyInstaller
+  build dependencies, glibc 2.35 baseline, PR binary verification and tag-only publishing.
+- Configurable ASPEED PCI BDF, CLI `--config`/`--bdf`, `--version`, and
+  non-actuating `check-config`; systemd no longer assumes one PCI address.
+- Validated configuration/source/curve inputs and finite temperature handling;
+  corrected fan telemetry loss/recovery handling.
+- Boot/device-scoped baseline capture before takeover, including manual writes;
+  restore refuses unknown state instead of guessing reference factory duty.
+  Upgrades from 1.0 require the stopped, verified legacy-state migration above.
+- Required injection failures no longer report healthy readiness; optional
+  mirroring failures are visible. Emergency PWM cooling tolerates malformed
+  mapping and unavailable baseline storage.
+- Authoritative ownership is separate from status telemetry, preventing
+  injection-mode heartbeat races with manual takeovers.
 
 ## License
 

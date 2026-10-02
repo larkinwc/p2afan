@@ -1,6 +1,8 @@
 """Piecewise-linear temperature -> duty curves with hysteresis."""
 
 from __future__ import annotations
+import math
+
 
 from .sources import Source
 
@@ -17,12 +19,27 @@ class Curve:
     def __init__(
         self, points: list[tuple[float, float]], hysteresis_c: float = 0.0
     ) -> None:
-        if not points:
+        if not isinstance(points, (list, tuple)) or not points:
             raise ValueError("curve needs at least one point")
-        pts = sorted((float(t), float(d)) for t, d in points)
+        pts = []
+        for point in points:
+            if (not isinstance(point, (list, tuple)) or len(point) != 2
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                           or not math.isfinite(v) for v in point)):
+                raise ValueError("curve points must contain finite temperature and duty")
+            temp, duty = map(float, point)
+            if not 0 <= duty <= 100:
+                raise ValueError("curve duty must be between 0 and 100")
+            pts.append((temp, duty))
+        pts.sort()
         temps = [t for t, _ in pts]
         if len(set(temps)) != len(temps):
             raise ValueError("curve has duplicate temperatures")
+        if any(d1 < d0 for (_, d0), (_, d1) in zip(pts, pts[1:])):
+            raise ValueError("curve duty must be nondecreasing with temperature")
+        if (isinstance(hysteresis_c, bool) or not isinstance(hysteresis_c, (int, float))
+                or not math.isfinite(hysteresis_c) or hysteresis_c < 0):
+            raise ValueError("hysteresis_c must be finite and nonnegative")
         self.points = pts
         self.hysteresis_c = float(hysteresis_c)
         self._last_temp: float | None = None
@@ -67,6 +84,15 @@ class Zone:
         curve: Curve,
         critical_c: float,
     ) -> None:
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("zone name must be nonempty")
+        names = [source.name for source in sources]
+        if (not names or any(not isinstance(n, str) or not n.strip() for n in names)
+                or len(set(names)) != len(names)):
+            raise ValueError("zone sources need unique nonempty names")
+        if (isinstance(critical_c, bool) or not isinstance(critical_c, (int, float))
+                or not math.isfinite(critical_c)):
+            raise ValueError("critical_c must be finite")
         self.name = name
         self.sources = sources
         self.curve = curve
@@ -81,6 +107,8 @@ class Zone:
         best: float | None = None
         for source in self.sources:
             value = source.read()
+            if value is not None and not math.isfinite(value):
+                value = None
             readings[source.name] = value
             if value is None:
                 self.fail_counts[source.name] = self.fail_counts.get(source.name, 0) + 1
