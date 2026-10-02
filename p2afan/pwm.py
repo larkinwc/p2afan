@@ -70,18 +70,6 @@ CHANNELS: dict[str, tuple[int, bool, int, int]] = {
 
 ALL_CHANNELS = tuple(CHANNELS)
 
-# Factory duty bytes measured on this chassis, used as the last-resort
-# restore target when no runtime state file is available.
-FACTORY_FALL = {
-    "A": 0x33,
-    "B": 0x33,
-    "C": 0x33,
-    "D": 0x33,
-    "E": 0x33,
-    "F": 0x33,
-    "G": 0x00,
-    "H": 0x00,
-}
 
 FAN_NUM_EN_MASK = 0x00FF0000
 

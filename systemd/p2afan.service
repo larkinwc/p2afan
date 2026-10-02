@@ -1,14 +1,12 @@
 [Unit]
 Description=Host-side ASPEED BMC fan controller
-ConditionPathExists=/sys/bus/pci/devices/0000:0c:00.0/resource1
-After=multi-user.target
 
 [Service]
 Type=notify
 NotifyAccess=main
 WatchdogSec=30
-ExecStart=/opt/p2afan/bin/p2afan daemon
-ExecStopPost=/opt/p2afan/bin/p2afan stop-post
+ExecStart=/usr/local/bin/p2afan daemon
+ExecStopPost=/usr/local/bin/p2afan stop-post
 Restart=always
 RestartSec=5
 

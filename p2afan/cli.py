@@ -6,12 +6,14 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import time
+import tomllib
 
-from . import control, ipmi, pwm
-from .ahb import Ahb, BridgeBusy, BridgeUnavailable
+from . import __version__, control, ipmi, pwm
+from .ahb import Ahb, DEFAULT_BDF, bar_path, normalize_bdf
 
 FLASH_BASE = 0x20000000
 FLASH_SIZE = 0x1000000
@@ -31,14 +33,25 @@ def _need_root() -> None:
         raise SystemExit("p2afan: must run as root (needs PCI resource mmap)")
 
 
-def _session(args: argparse.Namespace | None = None) -> Ahb:
+def _pci_bdf(args: argparse.Namespace) -> str:
+    if args.bdf is not None:
+        return args.bdf
+    try:
+        with open(args.config, "rb") as fh:
+            return normalize_bdf(tomllib.load(fh).get("pci_bdf", DEFAULT_BDF))
+    except FileNotFoundError:
+        return DEFAULT_BDF
+
+
+def _session(args: argparse.Namespace) -> Ahb:
     """Open a P2A session, waiting a bounded time for the daemon's lock."""
     _need_root()
-    timeout = getattr(args, "lock_wait", 3.0) if args is not None else 3.0
-    ahb = Ahb(lock_timeout=timeout)
+    timeout = args.lock_wait
+    args.bdf = _pci_bdf(args)
+    ahb = Ahb(bar=bar_path(args.bdf), lock_timeout=timeout)
     try:
         ahb.ensure_bridge()
-    except BridgeUnavailable:
+    except BaseException:
         ahb.close()
         raise
     return ahb
@@ -90,10 +103,13 @@ def cmd_get(args: argparse.Namespace) -> int:
 
 
 def cmd_set(args: argparse.Namespace) -> int:
+    if not math.isfinite(args.pct) or not 0 <= args.pct <= 100:
+        raise ValueError("duty percent must be finite and between 0 and 100")
     with _session(args) as ahb:
         p = pwm.Pwm(ahb)
         chans = pwm.parse_channels(args.channels, default=p.enabled_channels())
         value = pwm.pct_to_byte(args.pct)
+        control.capture_manual_baseline(p, chans, _pci_bdf(args))
         for ch in chans:
             p.set_fall(ch, value)
         for ch in chans:
@@ -103,9 +119,12 @@ def cmd_set(args: argparse.Namespace) -> int:
 
 def cmd_set_raw(args: argparse.Namespace) -> int:
     value = int(args.value, 0)
+    if not 0 <= value <= 255:
+        raise ValueError("raw duty byte must be between 0 and 255")
     with _session(args) as ahb:
         p = pwm.Pwm(ahb)
         chans = pwm.parse_channels(args.channels, default=p.enabled_channels())
+        control.capture_manual_baseline(p, chans, _pci_bdf(args))
         for ch in chans:
             p.set_fall(ch, value)
         for ch in chans:
@@ -115,14 +134,14 @@ def cmd_set_raw(args: argparse.Namespace) -> int:
 
 def cmd_release(args: argparse.Namespace) -> int:
     _need_root()
-    applied = control.release()
+    applied = control.release(config_path=args.config, pci_bdf=_pci_bdf(args))
     print("restored: " + " ".join(f"PWM{c}={v:#04x}" for c, v in applied.items()))
     return 0
 
 
 def cmd_failsafe(args: argparse.Namespace) -> int:
     _need_root()
-    applied = control.force_failsafe()
+    applied = control.force_failsafe(config_path=args.config, pci_bdf=args.bdf)
     print("failsafe: " + " ".join(f"PWM{c}={v:#04x}" for c, v in applied.items()))
     return 0
 
@@ -203,10 +222,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     age = time.time() - state.get("ts", 0)
     print(f"mode        {state.get('mode')} (inject={state.get('inject')})")
+    print(f"pci_bdf     {state.get('pci_bdf')}")
     print(f"duty        {state.get('duty_pct')}% ({state.get('duty_byte', 0):#04x})")
     print(f"channels    {','.join(state.get('channels', []))}")
     print(f"failsafe    {state.get('failsafe')}")
     print(f"overrides   {state.get('overrides')}")
+    print(f"inject errors {','.join(hex(sensor) for sensor in state.get('injection_failures', [])) or 'none'}")
     print(f"state age   {age:.1f}s")
     for name, zone in (state.get("zones") or {}).items():
         readings = " ".join(
@@ -231,12 +252,12 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_daemon(args: argparse.Namespace) -> int:
     _need_root()
-    return control.run_daemon(args.config, args.mapping)
+    return control.run_daemon(args.config, args.mapping, pci_bdf=args.bdf)
 
 
 def cmd_stop_post(args: argparse.Namespace) -> int:
     _need_root()
-    return control.stop_post(args.mapping)
+    return control.stop_post(args.mapping, config_path=args.config, pci_bdf=args.bdf)
 
 
 def cmd_dump_flash(args: argparse.Namespace) -> int:
@@ -274,9 +295,23 @@ def cmd_ahb_read(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check_config(args: argparse.Namespace) -> int:
+    cfg = control.load_config(args.config)
+    mapping = control.load_mapping(args.mapping)
+    bdf = args.bdf or cfg.pci_bdf
+    print(f"configuration valid: mode={cfg.mode} pci_bdf={bdf} zones={len(cfg.zones)}")
+    if not mapping:
+        print("warning: no fan mapping; mapped fan monitoring is unavailable", file=sys.stderr)
+    print("no hardware accessed; sensor IDs, scaling, and airflow still require verification")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="p2afan", description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    ap.add_argument("--config", default=control.CONFIG_PATH, help="configuration TOML path")
+    ap.add_argument("--bdf", type=normalize_bdf, help="override configured ASPEED PCI address")
     ap.add_argument(
         "--lock-wait",
         type=float,
@@ -327,13 +362,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_status)
 
+    p = sub.add_parser("check-config", help="validate config and mapping without hardware access")
+    p.add_argument("--config", default=argparse.SUPPRESS)
+    p.add_argument("--mapping", default=control.MAPPING_PATH)
+    p.set_defaults(func=cmd_check_config)
+
     p = sub.add_parser("daemon", help="run the control loop")
-    p.add_argument("--config", default=control.CONFIG_PATH)
+    p.add_argument("--config", default=argparse.SUPPRESS)
     p.add_argument("--mapping", default=control.MAPPING_PATH)
     p.set_defaults(func=cmd_daemon)
 
     p = sub.add_parser("stop-post", help="systemd ExecStopPost handler")
     p.add_argument("--mapping", default=control.MAPPING_PATH)
+    p.add_argument("--config", default=argparse.SUPPRESS)
     p.set_defaults(func=cmd_stop_post)
 
     p = sub.add_parser("dump-flash", help="dump the 16 MiB BMC SPI flash over P2A")
@@ -351,9 +392,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _log_setup(args.verbose)
     try:
+        if not math.isfinite(args.lock_wait) or args.lock_wait < 0:
+            raise ValueError("--lock-wait must be finite and nonnegative")
         return args.func(args)
-    except BridgeBusy as exc:
-        raise SystemExit(f"p2afan: {exc}") from None
     except BrokenPipeError:
         # Piped into head/less: drop stdout so Python does not re-raise at exit.
         try:
@@ -361,6 +402,8 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             pass
         return 0
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise SystemExit(f"p2afan: {exc}") from None
 
 
 if __name__ == "__main__":

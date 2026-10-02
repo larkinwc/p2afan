@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import signal
 import socket
@@ -11,13 +12,14 @@ import time
 import tomllib
 
 from . import ipmi, pwm
-from .ahb import RUN_DIR, Ahb
+from .ahb import DEFAULT_BDF, RUN_DIR, Ahb, bar_path, normalize_bdf
 from .curve import Curve, Zone
 from .sources import build as build_source
 
 CONFIG_PATH = "/etc/p2afan/config.toml"
 MAPPING_PATH = "/etc/p2afan/mapping.toml"
 STATE_PATH = RUN_DIR + "/state.json"
+BASELINE_PATH = RUN_DIR + "/baseline.json"
 
 # Bounded so a stuck holder surfaces as a service failure instead of a hang.
 DAEMON_LOCK_WAIT = 30.0
@@ -29,6 +31,7 @@ INJECT_SENSORS = (0x20, 0x22, 0x24, 0x26)
 
 DEFAULTS = {
     "mode": "pwm",
+    "pci_bdf": DEFAULT_BDF,
     "inject": False,
     "tick_seconds": 5.0,
     "min_duty_pct": 20.0,
@@ -44,47 +47,99 @@ DEFAULTS = {
 }
 
 
+def _number(value: object, name: str, minimum: float, maximum: float | None = None,
+            *, positive: bool = False) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a finite number")
+    result = float(value)
+    if (not math.isfinite(result) or result < minimum
+            or (positive and result <= minimum)
+            or (maximum is not None and result > maximum)):
+        raise ValueError(f"{name} is outside its safe range")
+    return result
+
+
+def _count(value: object, name: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _name(value: object, kind: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{kind} name must be a nonempty string")
+    return value
+
+
 class Config:
     def __init__(self, data: dict) -> None:
+        if not isinstance(data, dict):
+            raise ValueError("config must be a table")
         opts = dict(DEFAULTS)
-        for key in DEFAULTS:
-            if key in data:
-                opts[key] = data[key]
-        self.mode = str(opts["mode"])
+        opts.update({key: data[key] for key in DEFAULTS if key in data})
+        self.pci_bdf = normalize_bdf(opts["pci_bdf"])
+        self.mode = opts["mode"]
         if self.mode not in ("pwm", "inject"):
             raise ValueError(f"mode must be 'pwm' or 'inject', got {self.mode!r}")
-        self.inject = bool(opts["inject"])
-        self.tick_seconds = float(opts["tick_seconds"])
-        self.min_duty_pct = float(opts["min_duty_pct"])
-        self.failsafe_duty_pct = float(opts["failsafe_duty_pct"])
-        self.down_slew_pct_per_tick = float(opts["down_slew_pct_per_tick"])
-        self.hold_interval = float(opts["hold_interval"])
-        self.source_fail_limit = int(opts["source_fail_limit"])
-        self.min_fan_rpm = int(opts["min_fan_rpm"])
-        self.recover_ticks = int(opts["recover_ticks"])
-        self.failsafe_inject_c = float(opts["failsafe_inject_c"])
-        self.write_channels = [str(c).upper() for c in opts["write_channels"]]
+        if type(opts["inject"]) is not bool:
+            raise ValueError("inject must be a boolean")
+        self.inject = opts["inject"]
+        self.tick_seconds = _number(opts["tick_seconds"], "tick_seconds", 0, positive=True)
+        self.min_duty_pct = _number(opts["min_duty_pct"], "min_duty_pct", 0, 100)
+        self.failsafe_duty_pct = _number(
+            opts["failsafe_duty_pct"], "failsafe_duty_pct", self.min_duty_pct, 100)
+        self.down_slew_pct_per_tick = _number(
+            opts["down_slew_pct_per_tick"], "down_slew_pct_per_tick", 0, 100, positive=True)
+        self.hold_interval = _number(opts["hold_interval"], "hold_interval", 0)
+        self.source_fail_limit = _count(opts["source_fail_limit"], "source_fail_limit")
+        self.min_fan_rpm = _count(opts["min_fan_rpm"], "min_fan_rpm")
+        self.recover_ticks = _count(opts["recover_ticks"], "recover_ticks")
+        self.failsafe_inject_c = _number(opts["failsafe_inject_c"], "failsafe_inject_c", 0, 255)
+        channels = opts["write_channels"]
+        if not isinstance(channels, list) or any(not isinstance(ch, str) for ch in channels):
+            raise ValueError("write_channels must be an array of channel names")
+        self.write_channels = [ch.upper() for ch in channels]
+        if len(set(self.write_channels)) != len(self.write_channels):
+            raise ValueError("write_channels contains duplicates")
         for ch in self.write_channels:
             if ch not in pwm.CHANNELS:
                 raise ValueError(f"write_channels has unknown channel {ch!r}")
         zones = data.get("zone", [])
-        if not zones:
-            raise ValueError("config has no [[zone]] entries")
-        self.zones = [
-            Zone(
-                name=z["name"],
-                sources=[build_source(s) for s in z.get("sources", [])],
-                curve=Curve(
-                    [tuple(p) for p in z["curve"]],
-                    hysteresis_c=float(z.get("hysteresis_c", 0.0)),
-                ),
-                critical_c=float(z["critical_c"]),
-            )
-            for z in zones
-        ]
-        for zone in self.zones:
-            if not zone.sources:
-                raise ValueError(f"zone {zone.name!r} has no sources")
+        if not isinstance(zones, list) or not zones:
+            raise ValueError("config needs [[zone]] entries")
+        self.zones = []
+        zone_names: set[str] = set()
+        source_names: set[str] = set()
+        for spec in zones:
+            if not isinstance(spec, dict):
+                raise ValueError("zone must be a table")
+            name = _name(spec.get("name"), "zone")
+            if name in zone_names:
+                raise ValueError(f"duplicate zone name {name!r}")
+            zone_names.add(name)
+            source_specs = spec.get("sources", [])
+            if not isinstance(source_specs, list) or not source_specs:
+                raise ValueError(f"zone {name!r} needs sources")
+            sources = []
+            for source_spec in source_specs:
+                if not isinstance(source_spec, dict):
+                    raise ValueError("source must be a table")
+                source_name = _name(source_spec.get("name"), "source")
+                if source_name in source_names:
+                    raise ValueError(f"duplicate source name {source_name!r}")
+                source_names.add(source_name)
+                sources.append(build_source(source_spec))
+            self.zones.append(Zone(
+                name=name, sources=sources,
+                curve=Curve(spec.get("curve", []), spec.get("hysteresis_c", 0.0)),
+                critical_c=_number(spec.get("critical_c"), "critical_c", -273.15),
+            ))
+        highest_duty = max(duty for zone in self.zones for _, duty in zone.curve.points)
+        if self.failsafe_duty_pct <= 0 or self.failsafe_duty_pct < highest_duty:
+            raise ValueError("failsafe_duty_pct must be positive and cover every curve duty")
+        if ((self.inject or self.mode == "inject")
+                and self.failsafe_inject_c < max(zone.critical_c for zone in self.zones)):
+            raise ValueError("failsafe_inject_c must reach every zone's critical_c")
 
 
 def load_config(path: str = CONFIG_PATH) -> Config:
@@ -98,11 +153,22 @@ def load_mapping(path: str = MAPPING_PATH) -> dict[str, list[str]]:
             data = tomllib.load(fh)
     except FileNotFoundError:
         return {}
-    return {
-        ch.upper(): list(fans)
-        for ch, fans in (data.get("channels") or {}).items()
-        if ch.upper() in pwm.CHANNELS
-    }
+    if "channels" not in data:
+        raise ValueError("mapping needs a [channels] table")
+    channels = data["channels"]
+    if not isinstance(channels, dict):
+        raise ValueError("mapping channels must be a table")
+    result: dict[str, list[str]] = {}
+    for channel, fans in channels.items():
+        ch = channel.upper()
+        if ch not in pwm.CHANNELS or ch in result:
+            raise ValueError(f"unknown or duplicate mapping channel {channel!r}")
+        if (not isinstance(fans, list)
+                or any(not isinstance(fan, str) or fan not in ipmi.FAN_SENSORS for fan in fans)
+                or len(set(fans)) != len(fans)):
+            raise ValueError(f"mapping PWM{ch} must contain unique known fan names")
+        result[ch] = list(fans)
+    return result
 
 
 def writable_channels(
@@ -135,7 +201,8 @@ def writable_channels(
     return [ch for ch in pwm.ALL_CHANNELS if ch in chans and p.enabled(ch)]
 
 
-def write_state(state: dict, path: str = STATE_PATH) -> None:
+def write_state(state: dict, path: str | None = None) -> None:
+    path = STATE_PATH if path is None else path
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
@@ -144,7 +211,8 @@ def write_state(state: dict, path: str = STATE_PATH) -> None:
     os.replace(tmp, path)
 
 
-def read_state(path: str = STATE_PATH) -> dict | None:
+def read_state(path: str | None = None) -> dict | None:
+    path = STATE_PATH if path is None else path
     try:
         with open(path) as fh:
             return json.load(fh)
@@ -172,28 +240,106 @@ def slew(previous: float | None, target: float, down_step: float) -> float:
     return max(target, previous - down_step)
 
 
-def choose_baseline(
-    live: dict[str, int], prev_state: dict | None
-) -> dict[str, int]:
-    """Pick the duty bytes to hand back to the BMC on release.
-
-    The live registers are the factory values only on a cold start. After a
-    crash-restart they are whatever ExecStopPost left behind (failsafe 0xff),
-    so latching them would make the next clean stop strand the fans at 100 %.
-    /run/p2afan/state.json is boot-scoped, so a baseline recorded there came
-    from a run that started before us and is the better answer; a reboot wipes
-    it and the live registers are genuinely factory again.
-    """
-    recorded = (prev_state or {}).get("baseline_duty")
-    if not isinstance(recorded, dict) or not recorded:
-        return dict(live)
-    out = {}
-    for ch, value in live.items():
+def _baseline_state() -> dict:
+    """Read authoritative ownership, independently of injection heartbeats."""
+    try:
+        with open(BASELINE_PATH) as fh:
+            state = json.load(fh)
+    except FileNotFoundError:
+        # Old status files carried ownership. Do not silently relatch a manual
+        # or crashed daemon's duty when upgrading without a safe release.
         try:
-            out[ch] = int(recorded[ch])
-        except (KeyError, TypeError, ValueError):
-            out[ch] = value
-    return out
+            with open(STATE_PATH) as fh:
+                legacy = json.load(fh)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("cannot read legacy pre-takeover baseline") from exc
+        if not isinstance(legacy, dict):
+            raise RuntimeError("invalid legacy state")
+        if legacy.get("baseline_duty") or legacy.get("devices"):
+            raise RuntimeError("legacy baseline; refusing to relatch an active takeover")
+        return {}
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("cannot read pre-takeover baseline") from exc
+    if not isinstance(state, dict) or not isinstance(state.get("devices", {}), dict):
+        raise RuntimeError("invalid pre-takeover baseline state")
+    # Unscoped state from older versions cannot safely be attributed to a device.
+    if state.get("baseline_duty") and not state.get("devices"):
+        raise RuntimeError("unscoped baseline; refusing to guess its PCI device")
+    return state
+
+
+def _active_baseline(state: dict, pci_bdf: str, *, required: bool = False) -> dict[str, int]:
+    entry = state.get("devices", {}).get(pci_bdf)
+    if entry is None:
+        if required:
+            raise RuntimeError(f"no active pre-takeover baseline for {pci_bdf}")
+        return {}
+    if not isinstance(entry, dict) or type(entry.get("active")) is not bool:
+        raise RuntimeError(f"invalid baseline for {pci_bdf}")
+    if not entry["active"]:
+        if entry.get("baseline_duty") != {}:
+            raise RuntimeError(f"invalid inactive baseline for {pci_bdf}")
+        if required:
+            raise RuntimeError(f"no active pre-takeover baseline for {pci_bdf}")
+        return {}
+    baseline = entry.get("baseline_duty")
+    if (not isinstance(baseline, dict) or not baseline
+            or any(ch not in pwm.CHANNELS or type(value) is not int or not 0 <= value <= 255
+                   for ch, value in baseline.items())):
+        raise RuntimeError(f"invalid active baseline for {pci_bdf}")
+    return dict(baseline)
+
+
+def capture_manual_baseline(p: pwm.Pwm, channels: list[str], pci_bdf: str) -> dict[str, int]:
+    """Persist ownership before any duty write, retaining an active takeover's original."""
+    pci_bdf = normalize_bdf(pci_bdf)
+    if not channels or any(ch not in pwm.CHANNELS for ch in channels):
+        raise ValueError("baseline capture needs valid PWM channels")
+    for ch in channels:
+        if not p.enabled(ch):
+            raise pwm.ChannelDisabled(f"PWM{ch} is disabled; refusing takeover")
+    state = _baseline_state()
+    baseline = _active_baseline(state, pci_bdf)
+    for ch in channels:
+        if ch not in baseline:
+            value = p.get_fall(ch)
+            if type(value) is not int or not 0 <= value <= 255:
+                raise RuntimeError(f"invalid live duty for PWM{ch}")
+            baseline[ch] = value
+    state.setdefault("devices", {})[pci_bdf] = {"active": True, "baseline_duty": baseline}
+    write_state(state, BASELINE_PATH)
+    return baseline
+
+
+def _restore_baseline(p: pwm.Pwm, pci_bdf: str) -> dict[str, int]:
+    state = _baseline_state()
+    baseline = _active_baseline(state, pci_bdf, required=True)
+    if any(not p.enabled(ch) for ch in baseline):
+        raise RuntimeError("owned PWM channel is disabled; cannot safely release")
+    applied = {}
+    for ch, value in sorted(baseline.items()):
+        p.set_fall(ch, value)
+        applied[ch] = p.get_fall(ch)
+        if applied[ch] != value:
+            raise RuntimeError(f"PWM{ch} baseline restore did not stick")
+    state["devices"][pci_bdf] = {"active": False, "baseline_duty": {}}
+    write_state(state, BASELINE_PATH)
+    return applied
+
+
+def _inject_sensors(temp: float) -> list[int]:
+    """Attempt every sensor and return failures, even if an earlier write fails."""
+    raw = max(0, min(255, int(round(temp))))
+    failures = []
+    for sensor in INJECT_SENSORS:
+        try:
+            ipmi.set_sensor_reading(sensor, raw)
+        except Exception as exc:
+            failures.append(sensor)
+            LOG.warning("inject sensor %#04x failed: %s", sensor, exc)
+    return failures
 
 
 class Controller:
@@ -205,25 +351,28 @@ class Controller:
         self.pwm: pwm.Pwm | None = None
         self.channels: list[str] = []
         self.baseline: dict[str, int] = {}
-        if self.uses_pwm:
-            # Inject mode deliberately never touches the bridge: it is the
-            # fallback for a BMC that has locked P2A, so requiring the bridge
-            # there would defeat its purpose.
-            self.ahb = Ahb(lock_timeout=DAEMON_LOCK_WAIT)
-            self.ahb.ensure_bridge()
-            self.pwm = pwm.Pwm(self.ahb)
-            self.channels = writable_channels(
-                mapping, self.pwm, config.write_channels
-            )
-            if not self.channels:
-                raise RuntimeError("no writable PWM channels; check mapping.toml")
-            self.baseline = self._capture_baseline()
-        self.fans = self._watched_fans()
+        try:
+            if self.uses_pwm:
+                # Inject mode never opens P2A, including emergency actuation.
+                self.ahb = Ahb(bar_path(config.pci_bdf), lock_timeout=DAEMON_LOCK_WAIT)
+                self.ahb.ensure_bridge()
+                self.pwm = pwm.Pwm(self.ahb)
+                self.channels = writable_channels(mapping, self.pwm, config.write_channels)
+                if not self.channels:
+                    raise RuntimeError("no writable PWM channels; check mapping.toml")
+                self.baseline = capture_manual_baseline(
+                    self.pwm, self.channels, config.pci_bdf)
+            self.fans = self._watched_fans()
+        except BaseException:
+            self.close()
+            raise
         self.current_pct: float | None = None
         self.overrides = 0
         self.failsafe = False
         self.cool_ticks = 0
         self.low_rpm_strikes: dict[str, int] = {}
+        self.fan_fail_counts: dict[str, int] = {}
+        self.injection_failures: list[int] = []
         self.ready = False
         LOG.info(
             "mode=%s inject=%s channels=%s baseline=%s watched_fans=%s",
@@ -234,17 +383,6 @@ class Controller:
             ",".join(self.fans) or "none",
         )
 
-    def _capture_baseline(self) -> dict[str, int]:
-        live = {ch: self.pwm.get_fall(ch) for ch in pwm.ALL_CHANNELS}
-        baseline = choose_baseline(live, read_state())
-        if baseline != live:
-            LOG.warning(
-                "inheriting pre-takeover baseline %s from %s (live regs are %s)",
-                {k: hex(v) for k, v in baseline.items()},
-                STATE_PATH,
-                {k: hex(v) for k, v in live.items()},
-            )
-        return baseline
 
     def _watched_fans(self) -> list[str]:
         """Tachs used for the stall check.
@@ -285,12 +423,9 @@ class Controller:
         return value, ok
 
     def inject_temps(self, temp: float) -> None:
-        raw = max(0, min(255, int(round(temp))))
-        for sensor in INJECT_SENSORS:
-            try:
-                ipmi.set_sensor_reading(sensor, raw)
-            except Exception as exc:
-                LOG.warning("inject sensor %#04x failed: %s", sensor, exc)
+        self.injection_failures = _inject_sensors(temp)
+        if self.injection_failures and not self.uses_pwm:
+            raise RuntimeError(f"required sensor injection failed: {self.injection_failures}")
 
     def actuate(self, pct: float, temp: float | None, failsafe: bool) -> int:
         """Apply the decision through whichever actuator this mode uses.
@@ -305,7 +440,10 @@ class Controller:
             value, _ = self.apply_duty(pct)
         if not self.uses_pwm or self.cfg.inject:
             feed = self.cfg.failsafe_inject_c if failsafe else temp
-            if feed is not None:
+            if feed is None:
+                if not self.uses_pwm:
+                    raise RuntimeError("inject mode has no temperature to actuate")
+            else:
                 self.inject_temps(feed)
         return value
 
@@ -313,12 +451,11 @@ class Controller:
         if not self.uses_pwm or self.pwm is None:
             LOG.info("inject mode: no duty registers were taken over")
             return
-        for ch, value in self.baseline.items():
-            if self.pwm.enabled(ch):
-                self.pwm.set_fall(ch, value)
+        applied = _restore_baseline(self.pwm, self.cfg.pci_bdf)
+        self.baseline = {}
         LOG.info(
             "released fans to baseline duty %s; BMC thermal loop resumes",
-            {k: hex(v) for k, v in self.baseline.items()},
+            {k: hex(v) for k, v in applied.items()},
         )
 
     # -- loop ------------------------------------------------------------
@@ -350,6 +487,28 @@ class Controller:
                 "readings": zone.last_readings,
             }
 
+        # Decide fan health before actuation: a stalled fan must never see a
+        # transient downward duty step before failsafe is reasserted.
+        rpms = {name: ipmi.read_fan_rpm(ipmi.FAN_SENSORS[name]) for name in self.fans}
+        fans_healthy = True
+        for name, rpm in rpms.items():
+            if rpm is None or not math.isfinite(rpm):
+                rpms[name] = None
+                fans_healthy = False
+                self.fan_fail_counts[name] = min(
+                    self.cfg.source_fail_limit, self.fan_fail_counts.get(name, 0) + 1)
+                if self.fan_fail_counts[name] >= self.cfg.source_fail_limit:
+                    reason = f"fan telemetry failing: {name}"
+            else:
+                self.fan_fail_counts[name] = 0
+                if rpm < self.cfg.min_fan_rpm:
+                    fans_healthy = False
+                    self.low_rpm_strikes[name] = min(2, self.low_rpm_strikes.get(name, 0) + 1)
+                else:
+                    self.low_rpm_strikes[name] = 0
+            if self.low_rpm_strikes.get(name, 0) >= 2:
+                reason = f"fan stalled: {name}"
+
         if critical or reason is not None:
             if not self.failsafe:
                 LOG.critical("entering failsafe: %s", reason)
@@ -358,7 +517,7 @@ class Controller:
             duty_pct = self.cfg.failsafe_duty_pct
         else:
             if self.failsafe:
-                self.cool_ticks += 1
+                self.cool_ticks = self.cool_ticks + 1 if fans_healthy else 0
                 if self.cool_ticks >= self.cfg.recover_ticks:
                     LOG.warning(
                         "leaving failsafe after %d clean ticks", self.cool_ticks
@@ -378,31 +537,19 @@ class Controller:
         value = self.actuate(duty_pct, hottest, self.failsafe)
         self.current_pct = duty_pct
 
-        rpms = {name: ipmi.read_fan_rpm(ipmi.FAN_SENSORS[name]) for name in self.fans}
-        for name, rpm in rpms.items():
-            if rpm is not None and rpm < self.cfg.min_fan_rpm:
-                self.low_rpm_strikes[name] = self.low_rpm_strikes.get(name, 0) + 1
-                if self.low_rpm_strikes[name] >= 2 and not self.failsafe:
-                    LOG.critical(
-                        "%s stalled at %d RPM for 2 ticks; forcing failsafe", name, rpm
-                    )
-                    self.failsafe = True
-                    self.cool_ticks = 0
-                    duty_pct = self.cfg.failsafe_duty_pct
-                    value = self.actuate(duty_pct, hottest, True)
-                    self.current_pct = duty_pct
-            else:
-                self.low_rpm_strikes[name] = 0
-
         state = {
             "ts": time.time(),
             "mode": self.cfg.mode,
+            "pci_bdf": self.cfg.pci_bdf,
             "inject": self.cfg.inject,
             "duty_pct": round(duty_pct, 1),
             "duty_byte": value,
             "channels": self.channels,
             "zones": zone_state,
             "fan_rpm": rpms,
+            "fan_fail_counts": dict(self.fan_fail_counts),
+            "low_rpm_strikes": dict(self.low_rpm_strikes),
+            "injection_failures": list(self.injection_failures),
             "failsafe": self.failsafe,
             "overrides": self.overrides,
             "baseline_duty": self.baseline,
@@ -462,94 +609,127 @@ class _Terminated(BaseException):
     """SIGTERM arrived; unwind so the fans get released."""
 
 
-def run_daemon(config_path: str = CONFIG_PATH, mapping_path: str = MAPPING_PATH) -> int:
+def run_daemon(config_path: str = CONFIG_PATH, mapping_path: str = MAPPING_PATH,
+               pci_bdf: str | None = None) -> int:
     cfg = load_config(config_path)
+    if pci_bdf is not None:
+        cfg.pci_bdf = normalize_bdf(pci_bdf)
     ctl = Controller(cfg, load_mapping(mapping_path))
 
     def _on_term(signum: int, _frame: object) -> None:
         raise _Terminated(signal.Signals(signum).name)
 
-    previous = signal.signal(signal.SIGTERM, _on_term)
+    previous = None
     try:
+        previous = signal.signal(signal.SIGTERM, _on_term)
         ctl.run()
     except (KeyboardInterrupt, _Terminated) as exc:
         LOG.info("%s; releasing fans", exc.args[0] if exc.args else "interrupted")
         ctl.release()
         return 0
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
         ctl.close()
     return 0
 
 
-def release(mapping_path: str = MAPPING_PATH) -> dict[str, int]:
-    """Restore the pre-takeover duty bytes and hand control back to the BMC."""
-    state = read_state()
-    baseline = None
-    if state and isinstance(state.get("baseline_duty"), dict):
-        baseline = {
-            ch: int(v)
-            for ch, v in state["baseline_duty"].items()
-            if ch in pwm.CHANNELS
-        }
-    if not baseline:
-        baseline = dict(pwm.FACTORY_FALL)
-        LOG.warning("no runtime baseline; restoring factory duty bytes")
-    with Ahb(lock_timeout=DAEMON_LOCK_WAIT) as ahb:
+def release(mapping_path: str = MAPPING_PATH, config_path: str = CONFIG_PATH,
+            pci_bdf: str | None = None) -> dict[str, int]:
+    """Restore only owned channels; no guessed factory fallback is safe."""
+    bdf = normalize_bdf(pci_bdf) if pci_bdf is not None else load_config(config_path).pci_bdf
+    # Refuse missing/corrupt state before opening the bridge, then re-read
+    # under its lock to serialize with manual commands and the daemon.
+    _active_baseline(_baseline_state(), bdf, required=True)
+    with Ahb(bar_path(bdf), lock_timeout=DAEMON_LOCK_WAIT) as ahb:
         ahb.ensure_bridge()
-        p = pwm.Pwm(ahb)
-        applied = {}
-        for ch, value in sorted(baseline.items()):
-            if p.enabled(ch):
-                p.set_fall(ch, value)
-                applied[ch] = p.get_fall(ch)
-    return applied
+        return _restore_baseline(pwm.Pwm(ahb), bdf)
 
 
-def force_failsafe(mapping_path: str = MAPPING_PATH) -> dict[str, int]:
-    """Drive every channel we own to failsafe duty.
-
-    If the bridge is gone (or busy), fall back to injecting a hot reading into
-    the BMC's GPU sensors so the factory curve ramps instead of nothing at all.
-    """
-    duty = 100.0
+def force_failsafe(mapping_path: str = MAPPING_PATH, config_path: str = CONFIG_PATH,
+                   pci_bdf: str | None = None) -> dict[str, int]:
+    """Emergency actuation honors inject mode, with IPMI fallback if P2A fails."""
+    duty = DEFAULTS["failsafe_duty_pct"]
     inject_c = DEFAULTS["failsafe_inject_c"]
+    bdf = normalize_bdf(pci_bdf) if pci_bdf is not None else DEFAULT_BDF
     explicit: list[str] | None = None
+    uses_pwm = False
     try:
-        cfg = load_config()
+        cfg = load_config(config_path)
         duty = cfg.failsafe_duty_pct
         inject_c = cfg.failsafe_inject_c
         explicit = cfg.write_channels
-    except Exception:
-        LOG.warning("config unreadable; using 100%% failsafe on all driven channels")
-    value = pwm.pct_to_byte(duty)
-    mapping = load_mapping(mapping_path)
+        uses_pwm = cfg.mode == "pwm"
+        if pci_bdf is None:
+            bdf = cfg.pci_bdf
+    except Exception as exc:
+        LOG.warning("config invalid (%s); trying its actuator identity with emergency defaults", exc)
+        try:
+            with open(config_path, "rb") as fh:
+                raw = tomllib.load(fh)
+            mode = raw.get("mode", DEFAULTS["mode"])
+            if mode not in ("pwm", "inject"):
+                raise ValueError("invalid emergency mode")
+            target = normalize_bdf(pci_bdf if pci_bdf is not None else raw.get("pci_bdf", DEFAULT_BDF))
+            uses_pwm = mode == "pwm"
+            bdf = target
+        except Exception:
+            LOG.warning("no trustworthy actuator identity; using sensor injection without P2A")
+    if not uses_pwm:
+        failures = _inject_sensors(inject_c)
+        if failures:
+            raise RuntimeError(f"required failsafe sensor injection failed: {failures}")
+        return {}
     try:
-        with Ahb(lock_timeout=DAEMON_LOCK_WAIT) as ahb:
+        mapping = load_mapping(mapping_path)
+    except Exception as exc:
+        LOG.warning("mapping unreadable (%s); using all driven channels", exc)
+        mapping = {}
+    value = pwm.pct_to_byte(duty)
+    try:
+        with Ahb(bar_path(bdf), lock_timeout=DAEMON_LOCK_WAIT) as ahb:
             ahb.ensure_bridge()
             p = pwm.Pwm(ahb)
+            channels = writable_channels(mapping, p, explicit)
+            if not channels:
+                raise RuntimeError("no writable PWM channels for failsafe")
+            try:
+                capture_manual_baseline(p, channels, bdf)
+            except Exception:
+                # Emergency cooling must not depend on runtime-state health.
+                # Keep corrupt state intact so a later release refuses to guess.
+                LOG.exception("cannot preserve baseline; proceeding with emergency PWM cooling")
             applied = {}
-            for ch in writable_channels(mapping, p, explicit):
+            for ch in channels:
                 p.set_fall(ch, value)
                 applied[ch] = p.get_fall(ch)
+                if applied[ch] != value:
+                    raise RuntimeError(f"PWM{ch} failsafe duty did not stick")
         return applied
     except Exception as exc:
         LOG.critical("failsafe via P2A failed (%s); injecting %g C instead", exc, inject_c)
-        for sensor in INJECT_SENSORS:
-            try:
-                ipmi.set_sensor_reading(sensor, int(inject_c))
-            except Exception as inner:
-                LOG.critical("failsafe injection on %#04x failed: %s", sensor, inner)
+        failures = _inject_sensors(inject_c)
+        if len(failures) == len(INJECT_SENSORS):
+            raise RuntimeError("all emergency sensor injection attempts failed") from exc
         return {}
 
 
-def stop_post(mapping_path: str = MAPPING_PATH) -> int:
+def stop_post(mapping_path: str = MAPPING_PATH, config_path: str = CONFIG_PATH,
+              pci_bdf: str | None = None) -> int:
     result = os.environ.get("SERVICE_RESULT", "unknown")
     if result == "success":
-        applied = release(mapping_path)
+        cfg = load_config(config_path)
+        applied = {}
+        if cfg.mode == "pwm":
+            bdf = normalize_bdf(pci_bdf) if pci_bdf is not None else cfg.pci_bdf
+            state = _baseline_state()
+            baseline = _active_baseline(state, bdf)
+            entry = state.get("devices", {}).get(bdf)
+            if baseline or entry is None:
+                applied = release(mapping_path, config_path, bdf)
         LOG.info("clean stop (%s); restored duty %s", result, applied)
     else:
-        applied = force_failsafe(mapping_path)
+        applied = force_failsafe(mapping_path, config_path, pci_bdf)
         LOG.critical(
             "unclean exit (SERVICE_RESULT=%s); forced failsafe duty %s",
             result,

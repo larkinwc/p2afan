@@ -1,5 +1,11 @@
 #!/bin/sh
-# Exec shim: run the p2afan CLI from /opt/p2afan with no install step.
-PYTHONPATH=/opt/p2afan${PYTHONPATH:+:$PYTHONPATH}
+# Run from an extracted release, a checkout, or the installed source tree.
+set -eu
+base=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ ! -d "$base/p2afan" ]; then
+    base=/opt/p2afan
+fi
+# Do not inherit an arbitrary module search path into a root hardware tool.
+PYTHONPATH=$base
 export PYTHONPATH
-exec /usr/bin/python3 -u -m p2afan.cli "$@"
+exec python3 -u -m p2afan.cli "$@"

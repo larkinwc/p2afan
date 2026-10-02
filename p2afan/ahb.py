@@ -16,10 +16,11 @@ from __future__ import annotations
 import fcntl
 import mmap
 import os
+import re
 import struct
 import time
 
-BAR = "/sys/bus/pci/devices/0000:0c:00.0/resource1"
+DEFAULT_BDF = "0000:0c:00.0"
 SIZE = 0x20000
 CFG_ENABLE = 0xF000
 CFG_WINDOW = 0xF004
@@ -42,6 +43,22 @@ class BridgeBusy(RuntimeError):
     """Another process holds the P2A lock."""
 
 
+def normalize_bdf(value: str) -> str:
+    """Validate a PCI address and supply domain 0000 when omitted."""
+    if not isinstance(value, str):
+        raise ValueError("pci_bdf must be a PCI address string")
+    value = value.lower()
+    if re.fullmatch(r"[0-9a-f]{2}:[0-1][0-9a-f]\.[0-7]", value):
+        value = "0000:" + value
+    if not re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-1][0-9a-f]\.[0-7]", value):
+        raise ValueError(f"invalid PCI address {value!r}; expected domain:bus:device.function")
+    return value
+
+
+def bar_path(pci_bdf: str) -> str:
+    return f"/sys/bus/pci/devices/{normalize_bdf(pci_bdf)}/resource1"
+
+
 class Ahb:
     """Exclusive, lock-protected handle on the P2A bridge.
 
@@ -49,7 +66,8 @@ class Ahb:
     the advisory lock released even on error.
     """
 
-    def __init__(self, bar: str = BAR, lock_timeout: float | None = None) -> None:
+    def __init__(self, bar: str | None = None, lock_timeout: float | None = None) -> None:
+        bar = bar_path(DEFAULT_BDF) if bar is None else bar
         self._bar = bar
         os.makedirs(RUN_DIR, mode=0o700, exist_ok=True)
         self._lock_fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)

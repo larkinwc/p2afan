@@ -8,10 +8,12 @@ be able to tell "cold" from "no idea", because the latter means failsafe.
 from __future__ import annotations
 
 import glob
+import math
 import re
 import subprocess
 
 from . import ipmi
+from .ahb import normalize_bdf
 
 _FLOAT = re.compile(r"-?\d+(?:\.\d+)?")
 
@@ -75,9 +77,7 @@ class PciHwmon(Source):
 
     def __init__(self, name: str, bdf: str, label: str | None = None) -> None:
         super().__init__(name)
-        self.bdf = bdf if ":" in bdf.split(".")[0] else bdf
-        if self.bdf.count(":") == 1:
-            self.bdf = "0000:" + self.bdf
+        self.bdf = normalize_bdf(bdf)
         self.label = label
 
     def _inputs(self) -> list[str]:
@@ -149,11 +149,27 @@ def build(spec: dict) -> Source:
     """Build a source from a config table: {kind = "...", name = "...", ...}."""
     spec = dict(spec)
     kind = spec.pop("kind", None)
-    if kind not in KINDS:
+    if not isinstance(kind, str) or kind not in KINDS:
         raise ValueError(f"unknown source kind {kind!r} (have {sorted(KINDS)})")
     name = spec.pop("name", None)
-    if not name:
-        raise ValueError(f"source of kind {kind!r} is missing a name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"source of kind {kind!r} needs a nonempty name")
+    if "timeout" in spec:
+        timeout = spec["timeout"]
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError(f"source {name!r} timeout must be finite and positive")
+    if kind == "ipmi":
+        sensor = spec.get("sensor")
+        if isinstance(sensor, bool) or not isinstance(sensor, int) or not 0 <= sensor <= 255:
+            raise ValueError(f"source {name!r} sensor must be an integer byte")
+    if kind == "exec":
+        command = spec.get("command")
+        if not isinstance(command, (str, list)) or not command or (
+            isinstance(command, list) and any(not isinstance(arg, str) or not arg for arg in command)
+        ):
+            raise ValueError(f"source {name!r} command must be a nonempty string or argument list")
+    if kind == "hwmon" and (not isinstance(spec.get("path"), str) or not spec["path"]):
+        raise ValueError(f"source {name!r} needs a nonempty path")
     try:
         return KINDS[kind](name, **spec)
     except TypeError as exc:
